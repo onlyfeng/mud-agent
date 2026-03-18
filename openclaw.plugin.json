@@ -1,0 +1,20 @@
+{
+  "id": "mud-agent",
+  "name": "MUD Agent",
+  "description": "AI-powered MUD game assistant — play text MUDs through natural language conversation",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "storageDir": {
+        "type": "string",
+        "description": "Root directory for per-session MUD data. Defaults to ~/.mud-agent/sessions/. Rarely needs to be changed."
+      },
+      "commandName": {
+        "type": "string",
+        "default": "mud"
+      }
+    }
+  }
+}

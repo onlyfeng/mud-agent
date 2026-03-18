@@ -1,0 +1,62 @@
+{
+  "name": "mud-agent",
+  "version": "0.1.0",
+  "description": "AI-powered MUD game client — play text adventure games through natural language conversation",
+  "keywords": [
+    "mud",
+    "ai",
+    "skill",
+    "claude",
+    "opencode",
+    "game",
+    "telnet",
+    "zmud"
+  ],
+  "author": "onlyfeng",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/onlyfeng/mud-agent"
+  },
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "main": "dist/cli/main.js",
+  "bin": {
+    "mud-ctl": "dist/cli/main.js"
+  },
+  "scripts": {
+    "setup": "node dist/cli/main.js",
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -w -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "biome check src/",
+    "lint:fix": "biome check --write src/",
+    "format": "biome format --write src/",
+    "typecheck": "tsc --noEmit",
+    "ci": "npm run typecheck && npm run lint && npm run test && npm run build"
+  },
+  "dependencies": {
+    "iconv-lite": "^0.6.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.7",
+    "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^4.1.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  }
+}

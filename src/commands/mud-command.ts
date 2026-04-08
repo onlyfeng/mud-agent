@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { OpenClawPluginApi } from "../core/types";
-import { resolveSessionKey } from "../lib/session-key";
-import { getMudSessionStore } from "../storage/session-store";
+import type { OpenClawCommandContext, OpenClawPluginApi } from "../core/types.js";
+import { resolveSessionKey } from "../lib/session-key.js";
+import { getMudSessionStore } from "../storage/session-store.js";
 
 function helpText(): string {
   return [
@@ -19,10 +19,11 @@ function helpText(): string {
     "/mud where                   Show Session ID (debug)",
     "/mud help                    Show this help",
     "",
-    "-- Autopilot Modes (tell the AI) --",
-    '"Go explore, tell me if anything interesting" → semi-auto mode',
-    '"Go grind, only call me if I\'m near death"   → full-auto mode',
-    '"Stop, I\'ll play myself"                      → back to interactive mode',
+    "-- Game Modes --",
+    "/mud mode companion              Companion mode — play together, AI narrates (default)",
+    "/mud mode semi-auto [style]      Autopilot explores, pauses at key events for your decision",
+    "/mud mode full-auto [style]      Autopilot runs fully, only critical notifications",
+    "  style: exploration (default) | grinding",
     "",
     "-- Quick Start --",
     "1. Send: /mud start mud.pkuxkx.net:8081 utf8",
@@ -64,7 +65,7 @@ export function registerMudCommand(api: OpenClawPluginApi): void {
     description: "MUD game control",
     acceptsArgs: true,
     requireAuth: false,
-    handler: async (ctx: Record<string, unknown>) => {
+    handler: async (ctx: OpenClawCommandContext) => {
       const sessionKey = resolveSessionKey(ctx);
       const store = getMudSessionStore();
       const argsStr = typeof ctx.args === "string" ? (ctx.args as string).trim() : "";
@@ -169,6 +170,83 @@ export function registerMudCommand(api: OpenClawPluginApi): void {
           fs.writeFileSync(flatControlFile, stopPayload);
         } catch {}
         return { text: "OK: stop signal sent" };
+      }
+
+      if (action === "mode") {
+        const modeArg = args[1];
+        const styleArg = args[2] || "exploration";
+
+        const validModes = ["companion", "semi-auto", "full-auto"];
+        const validStyles = ["exploration", "grinding"];
+
+        if (!modeArg || !validModes.includes(modeArg)) {
+          return {
+            text: [
+              "ERROR: invalid mode. Usage: /mud mode <companion|semi-auto|full-auto> [exploration|grinding]",
+              "",
+              "-- Game Modes --",
+              "/mud mode companion              Companion mode — play together, AI narrates (default)",
+              "/mud mode semi-auto [style]      Autopilot explores, pauses at key events for your decision",
+              "/mud mode full-auto [style]      Autopilot runs fully, only critical notifications",
+              "  style: exploration (default) | grinding",
+            ].join("\n"),
+          };
+        }
+
+        if (styleArg && !validStyles.includes(styleArg)) {
+          return { text: `ERROR: invalid style "${styleArg}". Use: exploration | grinding` };
+        }
+
+        // 写 game-mode.json
+        const gameModeFile = path.join(dir, "game-mode.json");
+        fs.writeFileSync(gameModeFile, JSON.stringify({ mode: modeArg }, null, 2));
+
+        if (modeArg === "companion") {
+          // 切到陪伴模式：向 autopilot 发停止信号
+          const autopilotControlFile = path.join(dir, "autopilot-control.json");
+          try {
+            fs.writeFileSync(autopilotControlFile, JSON.stringify({ action: "stop" }));
+          } catch {}
+          return { text: "OK: switched to companion mode. Autopilot stop signal sent. You are now in control." };
+        }
+
+        // semi-auto 或 full-auto：写 autopilot-config.json，按需启动 autopilot
+        const pauseOn = modeArg === "semi-auto" ? ["rare_item", "boss", "puzzle", "level_up"] : [];
+        const autopilotConfigData = {
+          style: styleArg,
+          pauseOn,
+        };
+        const autopilotConfigFile = path.join(dir, "autopilot-config.json");
+        fs.writeFileSync(autopilotConfigFile, JSON.stringify(autopilotConfigData, null, 2));
+
+        // 检查 autopilot 是否已在运行
+        const autopilotPidFile = path.join(dir, "autopilot.pid");
+        let autopilotRunning = false;
+        try {
+          const pid = parseInt(fs.readFileSync(autopilotPidFile, "utf8").trim(), 10);
+          process.kill(pid, 0);
+          autopilotRunning = true;
+        } catch {}
+
+        if (!autopilotRunning) {
+          const autopilotScript = path.resolve(__dirname, "../../dist/cli/autopilot-entry.js");
+          const autopilotLogFile = path.join(dir, "autopilot.log");
+          const out = fs.openSync(autopilotLogFile, "a");
+          const child = spawn("node", [autopilotScript], {
+            detached: true,
+            stdio: ["ignore", out, out],
+            env: { ...process.env, MUD_DIR: dir },
+          });
+          child.unref();
+          fs.closeSync(out);
+          return {
+            text: `OK: switched to ${modeArg} mode (style: ${styleArg}). Autopilot started (PID ${child.pid}).`,
+          };
+        }
+
+        return {
+          text: `OK: switched to ${modeArg} mode (style: ${styleArg}). Autopilot is already running.`,
+        };
       }
 
       return { text: helpText() };

@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { MudActParams, OpenClawPluginApi } from "../core/types";
-import { resolveSessionDir } from "../lib/session-key";
-import { getMudSessionStore } from "../storage/session-store";
+import type { MudActParams, OpenClawPluginApi } from "../core/types.js";
+import { resolveSessionDir } from "../lib/session-key.js";
+import { getMudSessionStore } from "../storage/session-store.js";
 
 /**
  * mud_act — 游戏动作工具（send + wait + read_since 三合一）

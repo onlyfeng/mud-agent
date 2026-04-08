@@ -1,10 +1,10 @@
-import type { OpenClawPluginApi } from "../core/types";
-import { registerMudActTool } from "./mud-act";
-import { registerMudAdminTool } from "./mud-admin";
-import { registerMudAlertsTool } from "./mud-alerts";
-import { registerMudReadTool } from "./mud-read";
-import { registerMudSendTool } from "./mud-send";
-import { registerMudStatusTool } from "./mud-status";
+import type { OpenClawPluginApi } from "../core/types.js";
+import { registerMudActTool } from "./mud-act.js";
+import { registerMudAdminTool } from "./mud-admin.js";
+import { registerMudAlertsTool } from "./mud-alerts.js";
+import { registerMudReadTool } from "./mud-read.js";
+import { registerMudSendTool } from "./mud-send.js";
+import { registerMudStatusTool } from "./mud-status.js";
 
 export function registerMudTools(api: OpenClawPluginApi): void {
   registerMudActTool(api); // ← 新增：send+wait+read 三合一，优先使用

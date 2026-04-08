@@ -2,7 +2,7 @@
  * 自动登录模式匹配。
  */
 
-import type { MudConfig } from "./types";
+import type { MudConfig } from "./types.js";
 
 interface LoginPattern {
   re: RegExp;
@@ -46,6 +46,12 @@ export function detectLoginAction(lines: string[], cfg: MudConfig, lastField?: s
     }
   }
 
+  // 优先检查登录成功标志：重连时"用户名提示"与"重新连线完毕"可能在同一批数据到达，
+  // 若先匹配 LOGIN_PATTERNS 则会误触发凭据发送，故 SUCCESS 检查必须在 LOGIN_PATTERNS 之前。
+  if (LOGIN_SUCCESS_RE.test(text)) {
+    return { type: "success" };
+  }
+
   for (const { re, field } of LOGIN_PATTERNS) {
     // 已发过用户名则跳过用户名模式，避免「用户名:密码:」合并行被重复触发
     if (field === "username" && lastField === "username") continue;
@@ -57,10 +63,6 @@ export function detectLoginAction(lines: string[], cfg: MudConfig, lastField?: s
       return { type: "none" };
     }
     return { type: "send", value: `${val}\n`, field };
-  }
-
-  if (LOGIN_SUCCESS_RE.test(text)) {
-    return { type: "success" };
   }
 
   return { type: "none" };

@@ -3,3 +3,5 @@ dist/
 coverage/
 *.corrupt.*
 .heartbeat
+*.pid
+*.log

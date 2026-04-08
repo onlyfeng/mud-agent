@@ -2,8 +2,8 @@
  * 挂机策略：寻怪 → 战斗循环。
  */
 
-import { detectCombat } from "../../core/text-analyzer";
-import type { GameState, IStrategy, StrategyAction, StrategyContext } from "../../core/types";
+import { detectCombat } from "../../core/text-analyzer.js";
+import type { GameState, IStrategy, StrategyAction, StrategyContext } from "../../core/types.js";
 
 export class GrindingStrategy implements IStrategy {
   private phase: "seek" | "combat" = "seek";

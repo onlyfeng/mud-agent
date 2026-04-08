@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { MudSession } from "../core/types";
+import type { MudSession } from "../core/types.js";
 
 export type { MudSession };
 

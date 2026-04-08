@@ -5,14 +5,14 @@
 
 import fs from "node:fs";
 import net from "node:net";
-import { decode, encode, stripAnsi } from "../core/encoding";
-import { detectLoginAction } from "../core/login-handler";
-import { parseState } from "../core/state-parser";
-import { checkTriggers } from "../core/triggers";
-import type { Alert, GameState, MudConfig, MudPaths } from "../core/types";
-import { appendOutput, loadJSON, writeJSON } from "../infra/file-store";
-import { Logger } from "../infra/logger";
-import { removePid, writePid } from "../infra/process-guard";
+import { decode, encode, stripAnsi } from "../core/encoding.js";
+import { detectLoginAction } from "../core/login-handler.js";
+import { parseState } from "../core/state-parser.js";
+import { checkTriggers } from "../core/triggers.js";
+import type { Alert, GameState, MudConfig, MudPaths, ShutdownReason } from "../core/types.js";
+import { appendOutput, loadJSON, writeJSON } from "../infra/file-store.js";
+import { Logger } from "../infra/logger.js";
+import { removePid, writePid } from "../infra/process-guard.js";
 
 export interface DaemonOptions {
   paths: MudPaths;
@@ -24,6 +24,31 @@ const BASE_DELAY = 15_000;
 const MAX_DELAY = 300_000;
 const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 分钟
 const EMPTY_CRED_GRACE = 60_000; // 60 秒
+
+// ── 登录延迟常量 ─────────────────────────────────────────────
+const LOGIN_CUSTOM_DELAY = 200; // loginSequence 自定义步骤（服务端等待窗口较短）
+const LOGIN_FIELD_DELAY = 800; // 标准用户名/密码字段（留出服务端处理时间）
+
+// ── 关机 Alert 定义 ──────────────────────────────────────────
+const SHUTDOWN_ALERT_MAP: Partial<
+  Record<ShutdownReason, { label: string; advice: string; priority: Alert["priority"] }>
+> = {
+  "reconnect-limit": {
+    label: "连接已断开：重连次数达到上限，请通过 mud_admin start 重新启动",
+    advice: "调用 mud_admin start 重新连接，或检查服务器是否正常。",
+    priority: "critical",
+  },
+  "empty-credentials": {
+    label: "守护进程已停止：未配置凭据，请先 mud_admin setup",
+    advice: "调用 mud_admin setup 配置用户名、密码，然后再 mud_admin start。",
+    priority: "high",
+  },
+  "idle-timeout": {
+    label: "守护进程已停止：30 分钟无活动自动关闭",
+    advice: "调用 mud_admin start 重新连接。",
+    priority: "normal",
+  },
+};
 
 export function startDaemon(opts: DaemonOptions): void {
   const { paths } = opts;
@@ -48,6 +73,7 @@ export function startDaemon(opts: DaemonOptions): void {
   let connected = false;
   let loginDone = false;
   let lastLoginField: string | undefined;
+  let loginActionPending = false;
   let rawBuf: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   let rawBufTimer: ReturnType<typeof setTimeout> | null = null;
   let queueInterval: ReturnType<typeof setInterval> | null = null;
@@ -178,15 +204,18 @@ export function startDaemon(opts: DaemonOptions): void {
         }
       }
 
-      if (!loginDone && cfg) {
+      if (!loginDone && cfg && !loginActionPending) {
         const action = detectLoginAction(lines, cfg, lastLoginField);
         if (action.type === "send" && action.value && sock) {
           const loginValue = action.value;
           lastLoginField = action.field;
+          loginActionPending = true;
+          const delay = action.field === "custom" ? LOGIN_CUSTOM_DELAY : LOGIN_FIELD_DELAY;
           setTimeout(() => {
+            loginActionPending = false;
             logger.log("LOGIN", `发送 ${action.field}`);
             sock?.write(encode(loginValue, encoding));
-          }, 800);
+          }, delay);
         } else if (action.type === "success") {
           loginDone = true;
           wasLoggedIn = true;
@@ -244,6 +273,7 @@ export function startDaemon(opts: DaemonOptions): void {
       connected = false;
       loginDone = false;
       lastLoginField = undefined;
+      loginActionPending = false;
       state.connected = false;
       saveState();
       if (rawBufTimer) {
@@ -295,11 +325,34 @@ export function startDaemon(opts: DaemonOptions): void {
     }
   }, 1000);
 
-  function gracefulShutdown(reason: string): void {
+  function writeShutdownAlert(reason: ShutdownReason): void {
+    const def = SHUTDOWN_ALERT_MAP[reason];
+    if (!def) return;
+
+    const newAlert: Alert = {
+      id: `shutdown-${reason}-${Date.now()}`,
+      priority: def.priority,
+      label: def.label,
+      advice: def.advice,
+      context: `shutdownReason=${reason}`,
+      time: new Date().toISOString(),
+      read: false,
+    };
+
+    const alerts = loadJSON<Alert[]>(paths.alerts, []);
+    alerts.push(newAlert);
+    writeJSON(paths.alerts, alerts);
+    logger.log("WARN", `Alert written: ${def.label}`);
+  }
+
+  function gracefulShutdown(reason: ShutdownReason): void {
     if (shuttingDown) return;
     shuttingDown = true;
 
     logger.log("INFO", `Shutting down: ${reason}`);
+
+    // 在关机前写入 alert 通知（仅限异常原因）
+    writeShutdownAlert(reason);
 
     // 写入关机原因到 state.json
     state.connected = false;

@@ -3,9 +3,9 @@
  * autopilot 独立进程入口。
  */
 
-import { buildPaths, resolveMudDir } from "../infra/paths";
-import { removePid } from "../infra/process-guard";
-import { startAutopilot } from "../services/autopilot/autopilot.service";
+import { buildPaths, resolveMudDir } from "../infra/paths.js";
+import { removePid } from "../infra/process-guard.js";
+import { startAutopilot } from "../services/autopilot/autopilot.service.js";
 
 const mudDir = resolveMudDir();
 const paths = buildPaths(mudDir);

@@ -3,7 +3,7 @@
  */
 
 import path from "node:path";
-import type { MudPaths } from "../core/types";
+import type { MudPaths } from "../core/types.js";
 
 export function resolveMudDir(override?: string): string {
   return override || process.env.MUD_DIR || path.join(process.env.HOME || "", ".mud-agent");
@@ -27,5 +27,6 @@ export function buildPaths(mudDir: string): MudPaths {
     autopilotPid: path.join(mudDir, "autopilot.pid"),
     autopilotControl: path.join(mudDir, "autopilot-control.json"),
     autopilotLog: path.join(mudDir, "autopilot.log"),
+    gameModeFile: path.join(mudDir, "game-mode.json"),
   };
 }

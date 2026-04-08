@@ -6,10 +6,10 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { Alert, AutopilotConfig, Decision, GameState, MudConfig } from "../core/types";
-import { loadJSON, writeJSON } from "../infra/file-store";
-import { buildPaths, resolveMudDir } from "../infra/paths";
-import { isProcessRunning } from "../infra/process-guard";
+import type { Alert, AutopilotConfig, Decision, GameState, MudConfig } from "../core/types.js";
+import { loadJSON, writeJSON } from "../infra/file-store.js";
+import { buildPaths, resolveMudDir } from "../infra/paths.js";
+import { isProcessRunning } from "../infra/process-guard.js";
 
 const mudDir = resolveMudDir();
 const P = buildPaths(mudDir);
@@ -380,7 +380,7 @@ function main(): void {
         console.log("=== autopilot 状态 ===");
         console.log(`进程: ${apPid ? `运行中 (PID ${apPid})` : "未运行"}`);
         if (cfg) {
-          console.log(`模式: ${cfg.mode || "-"}  风格: ${cfg.style || "-"}`);
+          console.log(`风格: ${cfg.style || "-"}`);
           console.log(`安全线: HP >= ${cfg.safetyBoundary?.minHpPercent ?? 30}%`);
           console.log(`暂停触发: ${(cfg.pauseOn || []).join(", ")}`);
         }

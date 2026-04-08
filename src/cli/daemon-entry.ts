@@ -3,9 +3,9 @@
  * 守护进程独立入口 — 由 CLI start / OpenClaw spawn 调用。
  */
 
-import { buildPaths, resolveMudDir } from "../infra/paths";
-import { removePid } from "../infra/process-guard";
-import { startDaemon } from "../services/daemon.service";
+import { buildPaths, resolveMudDir } from "../infra/paths.js";
+import { removePid } from "../infra/process-guard.js";
+import { startDaemon } from "../services/daemon.service.js";
 
 const mudDir = resolveMudDir();
 const paths = buildPaths(mudDir);

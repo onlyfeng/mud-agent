@@ -2,7 +2,7 @@
  * 游戏状态解析：从文本行提取 HP/MP/出口/等级/金币。
  */
 
-import type { GameState } from "./types";
+import type { GameState } from "./types.js";
 
 export function parseState(lines: string[], currentState: Partial<GameState>): Partial<GameState> {
   const text = lines.join("\n");

@@ -3,7 +3,7 @@
  * zMUD triggers 的 AI 版本。
  */
 
-import type { Alert, AlertPriority, GameState, TriggerDefinition } from "./types";
+import type { Alert, AlertPriority, GameState, TriggerDefinition } from "./types.js";
 
 export const TRIGGERS: TriggerDefinition[] = [
   {

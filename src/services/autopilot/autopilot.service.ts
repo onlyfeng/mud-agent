@@ -3,15 +3,24 @@
  */
 
 import fs from "node:fs";
-import type { Alert, AutopilotConfig, Decision, GameState, IStrategy, MudPaths, OutputLine } from "../../core/types";
-import { loadJSON, writeJSON } from "../../infra/file-store";
-import { notify } from "../../infra/notifier";
-import { removePid, writePid } from "../../infra/process-guard";
-import { ExplorationStrategy } from "./exploration.strategy";
-import { GrindingStrategy } from "./grinding.strategy";
+import path from "node:path";
+import type {
+  Alert,
+  AutopilotConfig,
+  Decision,
+  GameMode,
+  GameState,
+  IStrategy,
+  MudPaths,
+  OutputLine,
+} from "../../core/types.js";
+import { loadJSON, writeJSON } from "../../infra/file-store.js";
+import { notify } from "../../infra/notifier.js";
+import { removePid, writePid } from "../../infra/process-guard.js";
+import { ExplorationStrategy } from "./exploration.strategy.js";
+import { GrindingStrategy } from "./grinding.strategy.js";
 
 const DEFAULT_CONFIG: AutopilotConfig = {
-  mode: "semi-auto",
   style: "exploration",
   loopInterval: 3500,
   reportInterval: 4,
@@ -24,6 +33,14 @@ const DEFAULT_CONFIG: AutopilotConfig = {
   autoPickup: true,
   combatEnabled: false,
 };
+
+function readGameMode(root: string): GameMode {
+  try {
+    const obj = JSON.parse(fs.readFileSync(path.join(root, "game-mode.json"), "utf8"));
+    if (["companion", "semi-auto", "full-auto"].includes(obj.mode)) return obj.mode as GameMode;
+  } catch {}
+  return "semi-auto";
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -131,6 +148,16 @@ export async function startAutopilot(paths: MudPaths): Promise<void> {
       }
     }
 
+    // 每次循环读取当前游戏模式
+    const gameMode = readGameMode(paths.root);
+
+    // companion 模式下 autopilot 不应执行，等待停止信号
+    if (gameMode === "companion") {
+      log("检测到陪伴模式，autopilot 暂停执行，等待停止信号...");
+      await sleep(2000);
+      continue;
+    }
+
     const userConfig = loadJSON<Partial<AutopilotConfig>>(paths.autopilotConfig, {});
     const config: AutopilotConfig = {
       ...DEFAULT_CONFIG,
@@ -162,7 +189,8 @@ export async function startAutopilot(paths: MudPaths): Promise<void> {
       }
     }
 
-    if (hasPendingDecisions(paths.decisions)) {
+    // 待处理决策检查：只在 semi-auto 模式下执行，full-auto 跳过
+    if (gameMode === "semi-auto" && hasPendingDecisions(paths.decisions)) {
       log("有待处理的决策，暂停执行。");
       await sleep(2000);
       continue;
@@ -188,9 +216,16 @@ export async function startAutopilot(paths: MudPaths): Promise<void> {
     if (action.narrative) appendReport(paths.report, action.narrative);
 
     if (action.pauseEvent) {
-      writeDecision(paths.decisions, action.pauseEvent, log);
-      notify("mud-agent", action.pauseEvent.summary.slice(0, 100));
-      appendReport(paths.report, `**[需要决策]** ${action.pauseEvent.summary}`);
+      if (gameMode === "semi-auto") {
+        // semi-auto：写决策 + 通知 + 报告
+        writeDecision(paths.decisions, action.pauseEvent, log);
+        notify("mud-agent", action.pauseEvent.summary.slice(0, 100));
+        appendReport(paths.report, `**[需要决策]** ${action.pauseEvent.summary}`);
+      } else {
+        // full-auto：只通知 + 报告，不写决策
+        notify("mud-agent", action.pauseEvent.summary.slice(0, 100));
+        appendReport(paths.report, `**[全自动跳过]** ${action.pauseEvent.summary}`);
+      }
     }
 
     await sleep(config.loopInterval || 3500);

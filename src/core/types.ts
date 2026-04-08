@@ -24,6 +24,8 @@ export interface MudConfig {
 
 // ─── 游戏状态 ────────────────────────────────────────────────
 
+export type ShutdownReason = "reconnect-limit" | "empty-credentials" | "idle-timeout" | "control-stop" | "signal";
+
 export interface GameState {
   connected: boolean;
   loginDone: boolean;
@@ -36,7 +38,7 @@ export interface GameState {
   exits: string[];
   location: string;
   lastSeen: string | null;
-  shutdownReason?: string | null;
+  shutdownReason?: ShutdownReason | null;
   shutdownAt?: string | null;
   lastQueueActivity?: string | null;
 }
@@ -99,7 +101,12 @@ export interface MudPaths {
   autopilotPid: string;
   autopilotControl: string;
   autopilotLog: string;
+  gameModeFile: string;
 }
+
+// ─── 游戏模式 ────────────────────────────────────────────────
+
+export type GameMode = "companion" | "semi-auto" | "full-auto";
 
 // ─── 会话管理 ────────────────────────────────────────────────
 
@@ -121,7 +128,6 @@ export interface SafetyBoundary {
 }
 
 export interface AutopilotConfig {
-  mode: "semi-auto" | "full-auto";
   style: AutopilotStyle;
   loopInterval: number;
   reportInterval: number;
@@ -161,42 +167,72 @@ export interface IStrategy {
   decide(ctx: StrategyContext): StrategyAction;
 }
 
-// ─── OpenClaw 插件 API（外部类型声明）─────────────────────────
+// ─── OpenClaw 插件 API（与 SDK 类型对齐的本地声明）─────────────
+// 注意：此处不直接引用 openclaw SDK 包，以保持 CLI 独立可用。
+// 类型形态追踪 openclaw@2026.3.24 plugin-sdk/src/plugins/types.d.ts
 
 export interface ToolResult {
-  content: Array<{ type: "text"; text: string }>;
+  content: Array<{ type: "text"; text: string } | { type: "image"; source: { type: "url"; url: string } }>;
+}
+
+export interface OpenClawCommandContext {
+  senderId?: string;
+  channel: string;
+  channelId?: string;
+  isAuthorizedSender: boolean;
+  args?: string;
+  commandBody: string;
+  config: Record<string, unknown>;
+  from?: string;
+  to?: string;
+  accountId?: string;
+  messageThreadId?: string | number;
+  [key: string]: unknown;
 }
 
 export interface OpenClawCommandDefinition {
   name: string;
   description: string;
-  acceptsArgs: boolean;
-  requireAuth: boolean;
+  acceptsArgs?: boolean;
+  requireAuth?: boolean;
   handler: (ctx: OpenClawCommandContext) => Promise<{ text: string }>;
-}
-
-export interface OpenClawCommandContext {
-  args: string;
-  sessionKey?: string;
-  [key: string]: unknown;
 }
 
 export interface OpenClawToolDefinition {
   name: string;
   description: string;
+  label?: string;
   parameters: Record<string, unknown>;
   execute: (id: string, params: Record<string, unknown>) => Promise<ToolResult>;
+  ownerOnly?: boolean;
+  displaySummary?: string;
+}
+
+export interface PluginLogger {
+  debug: (...args: unknown[]) => void;
+  info: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
 }
 
 export interface OpenClawPluginApi {
-  config?: {
-    plugins?: {
-      entries?: Record<string, { config?: Record<string, unknown> }>;
-    };
-  };
-  registerCommand?(def: OpenClawCommandDefinition): void;
-  registerTool?(def: OpenClawToolDefinition): void;
-  on?(event: string, handler: (event: unknown, ctx: unknown) => unknown): void;
+  id: string;
+  name: string;
+  version?: string;
+  description?: string;
+  source: string;
+  rootDir?: string;
+  registrationMode: "full" | "setup-only" | "setup-runtime";
+  config: Record<string, unknown>;
+  pluginConfig?: Record<string, unknown>;
+  runtime: Record<string, unknown>;
+  logger: PluginLogger;
+  registerCommand: (def: OpenClawCommandDefinition) => void;
+  registerTool: (def: OpenClawToolDefinition) => void;
+  on: (event: string, handler: (event: unknown, ctx: unknown) => unknown, opts?: { priority?: number }) => void;
+  registerHook: (events: string | string[], handler: (...args: unknown[]) => unknown) => void;
+  registerService: (service: unknown) => void;
+  resolvePath: (input: string) => string;
 }
 
 // ─── Tool 参数类型 ───────────────────────────────────────────
@@ -230,7 +266,7 @@ export interface MudAlertsParams {
 
 export interface MudAdminParams {
   sessionKey: string;
-  action: "start" | "stop" | "setup" | "login-step";
+  action: "start" | "stop" | "setup" | "login-step" | "set-mode";
   setupArgs?: {
     host: string;
     port: number;
@@ -241,5 +277,9 @@ export interface MudAdminParams {
   loginStepArgs?: {
     trigger: string;
     send: string;
+  };
+  setModeArgs?: {
+    mode: GameMode;
+    style?: AutopilotStyle;
   };
 }

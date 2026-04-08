@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import type { MudSessionStore } from "../storage/session-store";
+import type { MudSessionStore } from "../storage/session-store.js";
 
 /**
  * 解析 sessionKey 对应的数据目录。

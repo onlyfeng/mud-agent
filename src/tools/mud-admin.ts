@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { MudAdminParams, MudConfig, OpenClawPluginApi } from "../core/types";
-import { resolveSessionDir } from "../lib/session-key";
-import { getMudSessionStore } from "../storage/session-store";
+import type { AutopilotConfig, GameMode, MudAdminParams, MudConfig, OpenClawPluginApi } from "../core/types.js";
+import { resolveSessionDir } from "../lib/session-key.js";
+import { getMudSessionStore } from "../storage/session-store.js";
 
 export function registerMudAdminTool(api: OpenClawPluginApi): void {
   if (typeof api?.registerTool !== "function") return;
@@ -15,7 +15,7 @@ export function registerMudAdminTool(api: OpenClawPluginApi): void {
       type: "object",
       properties: {
         sessionKey: { type: "string" },
-        action: { type: "string", enum: ["start", "stop", "setup", "login-step"] },
+        action: { type: "string", enum: ["start", "stop", "setup", "login-step", "set-mode"] },
         setupArgs: {
           type: "object",
           properties: {
@@ -32,6 +32,14 @@ export function registerMudAdminTool(api: OpenClawPluginApi): void {
             trigger: { type: "string" },
             send: { type: "string" },
           },
+        },
+        setModeArgs: {
+          type: "object",
+          properties: {
+            mode: { type: "string", enum: ["companion", "semi-auto", "full-auto"] },
+            style: { type: "string", enum: ["exploration", "grinding"] },
+          },
+          required: ["mode"],
         },
       },
       required: ["sessionKey", "action"],
@@ -160,6 +168,73 @@ export function registerMudAdminTool(api: OpenClawPluginApi): void {
         fs.writeFileSync(controlFile, JSON.stringify({ action: "stop" }));
 
         return { content: [{ type: "text", text: "✅ 停止指令已发送，守护进程即将退出" }] };
+      }
+
+      if (params.action === "set-mode") {
+        const modeArg = params.setModeArgs?.mode as GameMode | undefined;
+        const validModes: GameMode[] = ["companion", "semi-auto", "full-auto"];
+        if (!modeArg || !validModes.includes(modeArg)) {
+          return {
+            content: [{ type: "text", text: "❌ set-mode 缺少有效的 mode 参数（companion / semi-auto / full-auto）" }],
+          };
+        }
+        const styleArg = params.setModeArgs?.style || "exploration";
+
+        // 写入游戏模式
+        fs.writeFileSync(path.join(dir, "game-mode.json"), JSON.stringify({ mode: modeArg }, null, 2));
+
+        if (modeArg === "companion") {
+          // 停止 autopilot（若运行中）
+          try {
+            fs.writeFileSync(path.join(dir, "autopilot-control.json"), JSON.stringify({ action: "stop" }));
+          } catch {}
+          return { content: [{ type: "text", text: "✅ 已切换到陪伴模式（autopilot 停止信号已发送）" }] };
+        }
+
+        // semi-auto / full-auto：写 autopilot 配置并启动
+        const autopilotCfg: AutopilotConfig = {
+          style: styleArg === "grinding" ? "grinding" : "exploration",
+          loopInterval: 3500,
+          reportInterval: 4,
+          safetyBoundary: { minHpPercent: 30, autoFlee: true, avoidCombatWith: [] },
+          pauseOn: modeArg === "full-auto" ? [] : ["rare_item", "boss", "puzzle", "level_up"],
+          autoPickup: true,
+          combatEnabled: false,
+        };
+        fs.writeFileSync(path.join(dir, "autopilot-config.json"), JSON.stringify(autopilotCfg, null, 2));
+
+        // 检查 autopilot 是否已在运行
+        const autopilotPidFile = path.join(dir, "autopilot.pid");
+        let autopilotRunning = false;
+        try {
+          const apid = parseInt(fs.readFileSync(autopilotPidFile, "utf8").trim(), 10);
+          process.kill(apid, 0);
+          autopilotRunning = true;
+        } catch {}
+
+        if (!autopilotRunning) {
+          const autopilotScript = path.resolve(__dirname, "../../dist/cli/autopilot-entry.js");
+          const logFile = path.join(dir, "autopilot.log");
+          const out = fs.openSync(logFile, "a");
+          const child = spawn("node", [autopilotScript], {
+            detached: true,
+            stdio: ["ignore", out, out],
+            env: { ...process.env, MUD_DIR: dir },
+          });
+          child.unref();
+          fs.closeSync(out);
+          const modeLabel = modeArg === "semi-auto" ? "半自动" : "全自动";
+          return {
+            content: [
+              { type: "text", text: `✅ 已切换到${modeLabel}模式（${styleArg}），autopilot 已启动 (PID ${child.pid})` },
+            ],
+          };
+        }
+
+        const modeLabel = modeArg === "semi-auto" ? "半自动" : "全自动";
+        return {
+          content: [{ type: "text", text: `✅ 已切换到${modeLabel}模式（${styleArg}），autopilot 已在运行中` }],
+        };
       }
 
       return { content: [{ type: "text", text: "❌ 未知操作" }] };

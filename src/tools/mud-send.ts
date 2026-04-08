@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { MudSendParams, OpenClawPluginApi } from "../core/types";
-import { resolveSessionDir } from "../lib/session-key";
-import { getMudSessionStore } from "../storage/session-store";
+import type { MudSendParams, OpenClawPluginApi } from "../core/types.js";
+import { resolveSessionDir } from "../lib/session-key.js";
+import { getMudSessionStore } from "../storage/session-store.js";
 
 export function registerMudSendTool(api: OpenClawPluginApi): void {
   if (typeof api?.registerTool !== "function") return;

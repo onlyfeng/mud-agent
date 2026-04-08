@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Alert, GameState, MudStatusParams, OpenClawPluginApi } from "../core/types";
-import { resolveSessionDir } from "../lib/session-key";
-import { getMudSessionStore } from "../storage/session-store";
+import type { Alert, GameState, MudStatusParams, OpenClawPluginApi } from "../core/types.js";
+import { resolveSessionDir } from "../lib/session-key.js";
+import { getMudSessionStore } from "../storage/session-store.js";
 
 export function registerMudStatusTool(api: OpenClawPluginApi): void {
   if (typeof api?.registerTool !== "function") return;

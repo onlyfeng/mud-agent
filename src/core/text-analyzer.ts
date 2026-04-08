@@ -2,7 +2,7 @@
  * 游戏文本分析工具（autopilot 策略使用）。
  */
 
-import type { OutputLine } from "./types";
+import type { OutputLine } from "./types.js";
 
 /** 从输出行中提取物品列表 */
 export function parseItemsFromLines(lines: OutputLine[]): string[] {

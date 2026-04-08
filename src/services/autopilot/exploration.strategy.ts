@@ -8,8 +8,8 @@ import {
   parseExitsFromLines,
   parseItemsFromLines,
   parseRoomName,
-} from "../../core/text-analyzer";
-import type { GameState, IStrategy, StrategyAction, StrategyContext } from "../../core/types";
+} from "../../core/text-analyzer.js";
+import type { GameState, IStrategy, StrategyAction, StrategyContext } from "../../core/types.js";
 
 export class ExplorationStrategy implements IStrategy {
   private phase: "look" | "move" | "pickup" = "look";

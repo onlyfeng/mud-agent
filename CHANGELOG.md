@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Restrict MUD prompt injection to registered MUD sessions or sessions with a live daemon, so stale `state.json` data no longer contaminates non-MUD chats.
+- Add a regression test covering both stale non-MUD sessions and registered paused MUD sessions.
+
 ## [0.1.0] - 2026-03-15
 
 ### Added

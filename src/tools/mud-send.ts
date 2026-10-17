@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { MudSendParams, OpenClawPluginApi } from "../core/types.js";
+import { enqueueCommands } from "../infra/send-queue.js";
 import { resolveSessionDir } from "../lib/session-key.js";
 import { getMudSessionStore } from "../storage/session-store.js";
 
@@ -23,21 +24,17 @@ export function registerMudSendTool(api: OpenClawPluginApi): void {
     async execute(_id: string, raw: Record<string, unknown>) {
       const params = raw as unknown as MudSendParams;
       const store = getMudSessionStore();
-      store.ensure(params.sessionKey);
+      // 写工具不注册会话：打错/从未初始化的键若在这里 ensure()，目录一出现模型路由就把该话题永久当成 MUD 会话
       const dir = resolveSessionDir(store, params.sessionKey);
+      if (!fs.existsSync(path.join(dir, "config.json"))) {
+        return {
+          content: [{ type: "text", text: "❌ 该会话尚未初始化：请先 /mud start host:port 或 mud_admin setup" }],
+        };
+      }
       const queueFile = path.join(dir, "send-queue.json");
 
-      let queue = { items: [] as object[] };
-      try {
-        queue = JSON.parse(fs.readFileSync(queueFile, "utf8"));
-      } catch {}
-
       const cmds = Array.isArray(params.commands) ? params.commands : [params.commands];
-      for (const cmd of cmds) {
-        queue.items.push({ cmd, time: new Date().toISOString() });
-      }
-
-      fs.writeFileSync(queueFile, JSON.stringify(queue, null, 2));
+      enqueueCommands(queueFile, cmds);
 
       return {
         content: [{ type: "text", text: `已加入队列 ${cmds.length} 条命令: ${cmds.join(", ")}` }],

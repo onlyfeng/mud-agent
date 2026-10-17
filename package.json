@@ -21,18 +21,26 @@
   },
   "files": [
     "dist/",
+    "install.sh",
     "LICENSE",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "src/",
+    "scripts/",
+    "tsconfig.json"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.19.0"
   },
   "main": "dist/cli/main.js",
   "bin": {
     "mud-ctl": "dist/cli/main.js"
   },
   "scripts": {
+    "install:runtime": "bash install.sh",
+    "normalize:sessions": "node scripts/normalize-sessions.mjs",
+    "normalize:sessions:apply": "node scripts/normalize-sessions.mjs --apply",
+    "verify:sessions": "node scripts/verify-normalize-sessions.mjs",
     "setup": "node dist/cli/main.js",
     "build": "tsc -p tsconfig.json",
     "watch": "tsc -w -p tsconfig.json",
@@ -43,7 +51,8 @@
     "lint:fix": "biome check --write src/",
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit",
-    "ci": "npm run typecheck && npm run lint && npm run test && npm run build"
+    "ci": "npm run typecheck && npm run lint && npm run test && npm run verify:sessions && npm run build",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "iconv-lite": "^0.6.3"
@@ -51,9 +60,9 @@
   "devDependencies": {
     "@biomejs/biome": "^2.4.7",
     "@types/node": "^20.0.0",
-    "@vitest/coverage-v8": "^4.1.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "typescript": "^5.0.0",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.10"
   },
   "openclaw": {
     "extensions": [

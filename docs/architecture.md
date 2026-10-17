@@ -22,9 +22,9 @@ MUD 服务器
 
 | 模式 | 用户说什么 | 主 Agent | 执行层 |
 |------|-----------|---------|-------|
-| **互动模式**（默认） | 直接对话 / "我来" / "停一下" | 每步叙述，等用户决策 | 不启动 |
-| **半自动模式** | "你去探索，有意思的告诉我" | 读 report.md 汇报亮点 | autopilot 跑，定期写叙事日志，遇亮点暂停 |
-| **全自动模式** | "去练级，快死了叫我" | 只在决策点/危险时介入 | autopilot 跑，只在关键事件写 decisions.json 并暂停 |
+| **陪伴模式（companion）**（默认） | 直接对话 / "我来" / "停一下" | 每步叙述，等用户决策 | 不启动 |
+| **半自动模式（semi-auto）** | "你去探索，有意思的告诉我" | 读 report.md 汇报亮点 | autopilot 跑，定期写叙事日志，遇亮点暂停 |
+| **全自动模式（full-auto）** | "去练级，快死了叫我" | 只在决策点/危险时介入 | autopilot 跑，只在关键事件写 decisions.json 并暂停 |
 
 **用户插话规则**：任何时候用户发消息，主 Agent 立即：
 1. 读当前游戏状态（state.json + report.md 最新段落）
@@ -128,11 +128,27 @@ OS 通知同理，内容要有画面感，而不是"游戏状态更新"。
 5. 处理决策 / 接管控制 / 继续委托执行层
 ```
 
-**互动模式循环**（用户逐步决策）：
+**陪伴模式循环**（用户逐步决策）：
 
 ```
 检查警报 → 读输出 → 获取状态 → 叙述给用户 → 等待输入 → 翻译命令 → 执行 → 循环
 ```
+
+### 模型路由（OpenClaw）
+
+插件通过 `before_model_resolve` hook 返回 `providerOverride` / `modelOverride`。门控条件是会话已注册为 MUD 会话（session 目录存在），比 prompt 注入宽：注入要求守护进程存活，模型路由不要求，这样上线 / 下线回合也走低延迟模型。模型取插件配置项 `model`（`provider/model`，必须显式配置；未配置或空字符串时不注册覆盖）。`/mud reset` 删掉目录后该话题回落到 agent 默认模型。
+
+宿主在模型回退（限流 / 鉴权 / 服务故障）时会为每个候选重新进入这个 hook，同一逻辑回合共用 `ctx.runId`（上游 openclaw/openclaw#63139）。插件只在一个 `runId` 的首次调用覆盖，同一 `runId` 再进来就是配置模型已失败后的回退尝试，此时不再覆盖，让回退链走到健康的候选。
+
+### 子任务投递策略（OpenClaw）
+
+插件注册一个 match-all 的 `before_tool_call` hook（`src/hooks/subagent-policy.ts`，兼容 code-mode `tool_call{id,args}` 包装）。两条路径的门控不同：
+
+- `sessions_spawn` 只对 MUD 回合生效：回合以活跃 MUD 会话开始（提示词注入时按 runId 记下），整个回合都按 MUD 处理，即使守护进程中途崩溃 / 空闲退出 / 被 `/mud stop`；没有记录到 runId 的调用方退回瞬时门控（session 目录存在且守护进程存活）。`/mud stop` 之后该话题新开回合派的子任务不再被改写。处理方式是剥掉 `completionTarget`。`completionTarget: "parent"` 是宿主的“私有结算”，结算回合的最终文字不会投递到频道；剥掉后走默认 announce 路径（top-level requester → follow-up agent call，deliver=true），结算回合以纯文字收尾即送达话题。
+- 结算回合（runId 以 `announce:` 开头）里的 `sessions_yield` 只要会话已注册（session 目录存在）就被阻断，不要求守护进程存活：子任务是在 daemon 还活着时派出的，结算回合到来前 `/mud stop` 或空闲退出不改变“yield 会被宿主丢弃”这个语义，这条简报仍要投递。`blockReason` 告诉模型改用纯文字收尾；用户发起的回合放行。
+- 结算回合最终回复为空（模型只输出推理、无可见文字）由宿主 embedded runner 自带的重试处理（仅推理最多 2 次、空回复 1 次）；重试用尽仍为空时该轮简报丢失，插件层没有可观察到这一结果的钩子（`before_agent_finalize` 只在宿主接受自然最终回复时运行）。2026-10-16 约 45 轮出现 1 次（r69）。
+
+背景和四次迭代的证据见 `common/topics/mud-agent/DISCUSSIONS.md` 2026-10-16 条目。
 
 ---
 
@@ -168,9 +184,8 @@ output.jsonl  state.json  alerts.json       send-queue.json  control.json
 
 ```
 ~/.mud-agent/
-├── mud-daemon.js            ← 守护进程脚本
-├── mud-ctl.js               ← 控制接口脚本
-├── mud-session.js           ← 按需会话脚本
+├── dist/                    ← install.sh 同步的编译产物
+├── mud-ctl.js / mud-daemon.js / autopilot.js  ← 指向 dist/ 的 shim
 ├── node_modules/
 ├── package.json
 │

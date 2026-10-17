@@ -3,6 +3,16 @@
   "name": "MUD Agent",
   "description": "AI-powered MUD game assistant — play text MUDs through natural language conversation",
   "version": "0.1.0",
+  "contracts": {
+    "tools": [
+      "mud_act",
+      "mud_admin",
+      "mud_alerts",
+      "mud_read",
+      "mud_send",
+      "mud_status"
+    ]
+  },
   "skills": ["skills"],
   "configSchema": {
     "type": "object",
@@ -11,6 +21,10 @@
       "storageDir": {
         "type": "string",
         "description": "Root directory for per-session MUD data. Defaults to ~/.mud-agent/sessions/. Rarely needs to be changed."
+      },
+      "model": {
+        "type": "string",
+        "description": "MUD 会话使用的 provider/model 引用（例如 deepseek/deepseek-chat）；未配置或空字符串则不覆盖模型"
       }
     }
   }

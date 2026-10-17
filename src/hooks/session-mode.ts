@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Alert, GameMode, GameState, OpenClawPluginApi } from "../core/types.js";
-import { resolveSessionDir, resolveSessionKey } from "../lib/session-key.js";
+import { isProcessRunning } from "../infra/process-guard.js";
+import { normalizeSessionKey, resolveSessionDir, resolveSessionKey } from "../lib/session-key.js";
 import { getMudSessionStore } from "../storage/session-store.js";
 
 /**
@@ -65,12 +66,18 @@ function buildCompanionContext(sessionKey: string, serverLine: string): string {
     "- 发送 chat/say 后：立即输出纯文字「已发出，等待回复」，不要继续轮询 read。",
     "- 连续 2 次找不到目标：停止搜索，告知用户现状，询问下一步。",
     "【下线规则】",
-    "- 用户说下线/离开/退出/结束/不玩了/关掉 → 必须调 mud_admin stop，然后告知已停止",
+    "- 用户说下线/离开/退出/结束/不玩了/关掉/再见 → 这是最高优先级硬指令，必须立刻调 mud_admin stop，然后告知已停止",
+    "- 对于「下线再见」「今天就到这」这类明确结束语，禁止先查资料/查状态/要求用户回复“继续”",
     "- 用户说挂机/保持连接 → 不停止，提醒 30 分钟无操作会自动断开",
     "- 未经用户明确确认，不要让 daemon 长期空转",
     "【游戏存档】",
     "游戏进度笔记（地图、角色状态、上次目标等）保存在 ~/.mud-agent/saves/ 下，按服务器命名，如 xiyouji-game-log.md。",
     "新会话开始时若用户未主动说明进度，可读取对应存档快速恢复上下文；游戏结束时应将新进展追加写入存档。",
+    "【汇报投递】",
+    "- 只有回合最后一条、不带工具调用的纯文字消息会发给用户；夹在工具调用之间的文字不会发送。",
+    "- 派发子任务时不要用 completionTarget: parent（那是私有结算，宿主不会把结算回合的文字投递到话题；插件会自动剥掉它）。用默认模式：子任务完成后宿主唤醒你，你以纯文字简报结束，它就会发到话题。",
+    "- 子任务完成触发的回合（消息以 [Subagent Context] 或 Continue the OpenClaw runtime event 开头）：先派发下一轮（如需要），然后用一条纯文字简报结束回合，简报所在的消息里不能有任何工具调用。这类回合里 sessions_yield 已被插件拦截（宿主本就会丢弃它），也不要用 wait 或 message 工具代替。",
+    "- 用户发起的回合：派发子任务后用 sessions_yield 交还控制，它的 acknowledgment 会发给用户，并登记后续简报的投递对象。",
     "【模式切换】",
     "你可以通过调用 mud_admin set-mode 主动切换游戏模式，识别以下自然语言触发词：",
     '- 「帮我挂机」「去自动探索」「你来玩」「自动探索吧」→ mud_admin { action:"set-mode", setModeArgs:{ mode:"semi-auto", style:"exploration" } }',
@@ -109,9 +116,15 @@ function buildSemiAutoContext(sessionKey: string, serverLine: string): string {
     "═══════════════════════════════════════════",
     "",
     "【下线规则】",
-    "- 用户说下线/离开/退出/结束/不玩了/关掉 → 必须调 mud_admin stop，然后告知已停止",
+    "- 用户说下线/离开/退出/结束/不玩了/关掉/再见 → 这是最高优先级硬指令，必须立刻调 mud_admin stop，然后告知已停止",
+    "- 对于「下线再见」「今天就到这」这类明确结束语，禁止先查资料/查状态/要求用户回复“继续”",
     "- 用户说挂机/保持连接 → 不停止，提醒 autopilot 正在运行",
     "- 未经用户明确确认，不要停止 autopilot 或 daemon",
+    "【事故处置】",
+    "- 循环里的小额、可恢复损失（如被 NPC 扒走随身铜钱、一轮零收益、路线偏移）自己调整策略后继续下一轮，在当轮简报里说明，不要停下来等用户定夺。",
+    "- 只有无法安全自判的情况才暂停询问：角色有死亡或被杀风险、连续三轮零收益、断线或无法登录且恢复失败、存款被动。",
+    "【汇报投递】",
+    "- 只有回合最后一条、不带工具调用的纯文字消息会发给用户。派发子任务不要用 completionTarget: parent（私有结算不投递，插件会剥掉）；子任务完成触发的回合用纯文字简报结束，那里的 sessions_yield 已被插件拦截。",
     "【模式切换】",
     '- 「我来玩」「我自己来」「陪我玩」「停止自动」→ mud_admin { action:"set-mode", setModeArgs:{ mode:"companion" } }',
     '- 「全自动」「不用汇报了」「完全自动跑」→ mud_admin { action:"set-mode", setModeArgs:{ mode:"full-auto" } }',
@@ -141,7 +154,8 @@ function buildFullAutoContext(sessionKey: string, serverLine: string): string {
     "- 严禁文字与工具调用同条消息（规则 A）。",
     "",
     "【下线规则】",
-    "- 用户说下线/离开/退出/结束/不玩了/关掉 → 必须调 mud_admin stop，然后告知已停止",
+    "- 用户说下线/离开/退出/结束/不玩了/关掉/再见 → 这是最高优先级硬指令，必须立刻调 mud_admin stop，然后告知已停止",
+    "- 对于「下线再见」「今天就到这」这类明确结束语，禁止先查资料/查状态/要求用户回复“继续”",
     "- 用户说挂机/保持连接 → 不停止，提醒全自动模式正在运行",
     "【模式切换】",
     '- 「我来玩」「暂停挂机」「陪我玩」→ mud_admin { action:"set-mode", setModeArgs:{ mode:"companion" } }',
@@ -165,14 +179,7 @@ function resolveDataDir(sessionKey: string): string {
  * 用于代替 session.mode 检查，兼容仅使用 mud-ctl.js shell 工作流的情况。
  */
 function isDaemonRunning(sessionKey: string): boolean {
-  const dir = resolveDataDir(sessionKey);
-  try {
-    const pid = parseInt(fs.readFileSync(path.join(dir, "mud-daemon.pid"), "utf8").trim(), 10);
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  return isProcessRunning(path.join(resolveDataDir(sessionKey), "mud-daemon.pid")) !== null;
 }
 
 /**
@@ -259,10 +266,7 @@ function isToolCallChainTooLong(sessionKey: string, limit: number): boolean {
         if (role === "assistant") {
           const content: Array<Record<string, unknown>> = obj?.message?.content ?? [];
           const hasTool = content.some((c) => c?.type === "toolCall");
-          if (hasTool) {
-            toolCount++;
-            continue;
-          }
+          if (hasTool) continue;
           if (content.some((c) => c?.type === "text" && typeof c.text === "string" && c.text.trim())) {
             toolCount = 0;
             break;
@@ -320,29 +324,169 @@ function countQueuedMessages(sessionKey: string): number {
   }
 }
 
+type HookMessage = Record<string, unknown>;
+
+const QUEUED_MARKER = "Queued messages while agent was busy";
+
+/**
+ * before_prompt_build 事件自带的会话消息快照（OpenClaw 已把会话存进 SQLite，
+ * 旧的 ~/.openclaw/agents/main/sessions/*.jsonl 只剩历史文件）。
+ * 返回 null 表示宿主没有提供快照，调用方回退到文件扫描。
+ */
+function readEventMessages(event: unknown): HookMessage[] | null {
+  const evt = (event ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(evt.messages)) return null;
+  return evt.messages.filter((m): m is HookMessage => typeof m === "object" && m !== null);
+}
+
+function messageTextOf(message: HookMessage): string {
+  const content = message.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((c): c is Record<string, unknown> => typeof c === "object" && c !== null && c.type === "text")
+    .map((c) => String(c.text ?? ""))
+    .join("\n");
+}
+
+function messageHasToolCall(message: HookMessage): boolean {
+  const content = message.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (c) =>
+      typeof c === "object" &&
+      c !== null &&
+      ((c as HookMessage).type === "toolCall" || (c as HookMessage).type === "tool_use"),
+  );
+}
+
+/**
+ * 从消息快照统计最近连续 tool call 次数（与 isToolCallChainTooLong 同一规则）：
+ * 从末尾往前数 toolResult（每次调用恰有一条），带 toolCall 的 assistant 消息只延续链条不计数，
+ * 遇到 user 消息或纯文字 assistant 消息即停。
+ */
+export function countToolCallChain(messages: HookMessage[]): number {
+  let toolCount = 0;
+  for (let i = messages.length - 1; i >= Math.max(0, messages.length - 200); i--) {
+    const message = messages[i];
+    const role = message.role;
+    if (role === "user") break;
+    if (role === "toolResult" || role === "tool") {
+      toolCount++;
+      continue;
+    }
+    if (role === "assistant") {
+      if (messageHasToolCall(message)) continue;
+      if (messageTextOf(message).trim()) break;
+    }
+  }
+  return toolCount;
+}
+
+/** 统计一段提示词里的排队消息条数（0 = 无排队）。 */
+export function countQueuedInText(text: string): number {
+  if (!text.includes(QUEUED_MARKER)) return 0;
+  const matches = text.match(/Queued #\d+/g);
+  return matches ? matches.length : 1;
+}
+
+/**
+ * 排队消息优先从本回合提示词判断（宿主把排队块拼进 prompt / currentUserMessage），
+ * 其次看快照里最后一条 user 消息；两者都没有时返回 null 让调用方回退到文件扫描。
+ */
+function countQueuedFromEvent(event: unknown, messages: HookMessage[] | null): number | null {
+  const evt = (event ?? {}) as Record<string, unknown>;
+  // 宿主可能只把排队块拼进其中一个字段：两个都看，取大者
+  const fromFields = [evt.currentUserMessage, evt.prompt].filter((v): v is string => typeof v === "string");
+  if (fromFields.length) return Math.max(...fromFields.map(countQueuedInText));
+  if (!messages) return null;
+  for (let i = messages.length - 1; i >= Math.max(0, messages.length - 20); i--) {
+    if (messages[i].role !== "user") continue;
+    return countQueuedInText(messageTextOf(messages[i]));
+  }
+  return 0;
+}
+
+/**
+ * Gate 1（零侵入门控）：此 Topic 是否注册过 MUD 会话。session 目录由 /mud start 调用 store.ensure() 创建，
+ * 不存在则从未激活 MUD，对普通对话完全透明。resolveSessionDir 内部有 Map 缓存，同一 Topic 后续调用为 O(1)。
+ * 不要求 daemon 在跑：模型路由与子任务结算回合的宿主语义都与 daemon 是否还活着无关。
+ */
+export function resolveRegisteredMudSessionKey(event: unknown, ctx: unknown): string | null {
+  const ctxRecord = (ctx ?? {}) as Record<string, unknown>;
+  const ocKey =
+    typeof ctxRecord.sessionKey === "string" && ctxRecord.sessionKey ? normalizeSessionKey(ctxRecord.sessionKey) : null;
+  const derivedKey = resolveSessionKey({ ...ctxRecord, event });
+  const store = getMudSessionStore();
+  const key = ocKey ?? derivedKey;
+  return fs.existsSync(resolveSessionDir(store, key)) ? key : null;
+}
+
+export function resolveActiveMudSessionKey(event: unknown, ctx: unknown): string | null {
+  const ctxRecord = (ctx ?? {}) as Record<string, unknown>;
+
+  const ocKey =
+    typeof ctxRecord.sessionKey === "string" && ctxRecord.sessionKey ? normalizeSessionKey(ctxRecord.sessionKey) : null;
+  const derivedKey = resolveSessionKey({ ...ctxRecord, event });
+
+  if (!resolveRegisteredMudSessionKey(event, ctx)) return null;
+
+  // Gate 2：daemon 运行门控
+  // 只在 daemon 确实运行时才注入 MUD 上下文，游戏停止后立即恢复干净对话。
+  const sessionKey =
+    (ocKey && isDaemonRunning(ocKey) ? ocKey : null) ?? (isDaemonRunning(derivedKey) ? derivedKey : null);
+
+  return sessionKey;
+}
+
+// 以"活跃 MUD 回合"开始的 run（按 runId 记，有界）：回合中途 daemon 崩溃 / 空闲退出 / 被 /mud stop 时，
+// 同一回合里后续的 sessions_spawn 仍按 MUD 回合处理——否则子任务走私有结算，简报丢失（正是这个钩子要避免的）。
+// 按时间过期而不是按条数淘汰：一个还在执行的长回合不能因为别处起了很多回合就被忘掉。
+// 生命期远大于任何一次回合（宿主回合有自己的超时）；条数上限只是极端情况下的内存保护，远高于真实并发回合数。
+const MUD_TURN_RUN_TTL_MS = 12 * 60 * 60 * 1000;
+const MUD_TURN_RUNS_HARD_CAP = 10_000;
+const mudTurnRuns = new Map<string, { sessionKey: string; at: number }>();
+
+function pruneMudTurnRuns(now: number): void {
+  for (const [runId, entry] of mudTurnRuns) if (now - entry.at > MUD_TURN_RUN_TTL_MS) mudTurnRuns.delete(runId);
+  while (mudTurnRuns.size > MUD_TURN_RUNS_HARD_CAP) {
+    const oldest = mudTurnRuns.keys().next().value;
+    if (oldest === undefined) break;
+    mudTurnRuns.delete(oldest);
+  }
+}
+
+export function rememberMudTurn(ctx: unknown, sessionKey: string, now = Date.now()): void {
+  const runId = (ctx as { runId?: unknown } | null | undefined)?.runId;
+  if (typeof runId !== "string" || !runId.trim()) return;
+  mudTurnRuns.delete(runId);
+  mudTurnRuns.set(runId, { sessionKey, at: now });
+  pruneMudTurnRuns(now);
+}
+
+/** 本 run 是否以活跃 MUD 回合开始；是则返回当时的会话键（仍要求该会话还注册着）。 */
+export function resolveMudTurnSessionKey(event: unknown, ctx: unknown): string | null {
+  const evt = (event ?? {}) as Record<string, unknown>;
+  const ctxRecord = (ctx ?? {}) as Record<string, unknown>;
+  const runId = evt.runId ?? ctxRecord.runId;
+  if (typeof runId !== "string") return null;
+  const entry = mudTurnRuns.get(runId);
+  if (!entry || Date.now() - entry.at > MUD_TURN_RUN_TTL_MS) return null;
+  const sessionKey = entry.sessionKey;
+  return fs.existsSync(resolveSessionDir(getMudSessionStore(), sessionKey)) ? sessionKey : null;
+}
+
+export function clearMudTurnRuns(): void {
+  mudTurnRuns.clear();
+}
+
 export function registerSessionModeHook(api: OpenClawPluginApi): void {
   if (typeof api?.on !== "function") return;
 
   api.on("before_prompt_build", (event: unknown, ctx: unknown) => {
-    const ctxRecord = (ctx ?? {}) as Record<string, unknown>;
-
-    const ocKey = typeof ctxRecord.sessionKey === "string" && ctxRecord.sessionKey ? ctxRecord.sessionKey : null;
-    const derivedKey = resolveSessionKey({ ...ctxRecord, event });
-
-    // Gate 1：零侵入门控
-    // session 目录由 /mud start 调用 store.ensure() 创建，不存在则此 Topic 从未激活 MUD。
-    // 未激活的 Topic 直接返回，不做任何 MUD 相关检查，对普通对话完全透明。
-    // resolveSessionDir 内部有 Map 缓存，同一 Topic 后续调用为 O(1)。
-    const store = getMudSessionStore();
-    const keyToCheck = ocKey ?? derivedKey;
-    if (!fs.existsSync(resolveSessionDir(store, keyToCheck))) return;
-
-    // Gate 2：daemon 运行门控
-    // 只在 daemon 确实运行时才注入 MUD 上下文，游戏停止后立即恢复干净对话。
-    const sessionKey =
-      (ocKey && isDaemonRunning(ocKey) ? ocKey : null) ?? (isDaemonRunning(derivedKey) ? derivedKey : null);
-
+    const sessionKey = resolveActiveMudSessionKey(event, ctx);
     if (!sessionKey) return;
+    rememberMudTurn(ctx, sessionKey);
 
     const { snapshot, serverLine } = buildStatusSnapshot(sessionKey);
     const dataDir = resolveDataDir(sessionKey);
@@ -358,10 +502,13 @@ export function registerSessionModeHook(api: OpenClawPluginApi): void {
     }
 
     const appendParts: string[] = [];
+    const eventMessages = readEventMessages(event);
+    const chainTooLongFor = (limit: number): boolean =>
+      eventMessages ? countToolCallChain(eventMessages) >= limit : isToolCallChainTooLong(sessionKey, limit);
 
     // 检测排队消息：companion 和 semi-auto 模式下注入，full-auto 跳过
     if (gameMode !== "full-auto") {
-      const queuedCount = countQueuedMessages(sessionKey);
+      const queuedCount = countQueuedFromEvent(event, eventMessages) ?? countQueuedMessages(sessionKey);
       if (queuedCount > 0) {
         appendParts.push(
           `\n\n[用户有 ${queuedCount} 条指令在工具链执行期间发送，已排队等候]` +
@@ -373,7 +520,7 @@ export function registerSessionModeHook(api: OpenClawPluginApi): void {
 
     // 连续工具调用超过阈值：companion 用 limit=3，semi-auto 用 limit=8，full-auto 跳过
     if (gameMode === "companion") {
-      const chainTooLong = isToolCallChainTooLong(sessionKey, TOOL_CALL_HARD_LIMIT_COMPANION);
+      const chainTooLong = chainTooLongFor(TOOL_CALL_HARD_LIMIT_COMPANION);
       if (chainTooLong) {
         appendParts.push(
           "\n\n[SYSTEM INTERRUPT] You have made " +
@@ -385,7 +532,7 @@ export function registerSessionModeHook(api: OpenClawPluginApi): void {
         );
       }
     } else if (gameMode === "semi-auto") {
-      const chainTooLong = isToolCallChainTooLong(sessionKey, TOOL_CALL_HARD_LIMIT_SEMI_AUTO);
+      const chainTooLong = chainTooLongFor(TOOL_CALL_HARD_LIMIT_SEMI_AUTO);
       if (chainTooLong) {
         appendParts.push(
           "\n\n[SYSTEM INTERRUPT] You have made " +

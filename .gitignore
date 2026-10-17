@@ -5,3 +5,4 @@ coverage/
 .heartbeat
 *.pid
 *.log
+.DS_Store

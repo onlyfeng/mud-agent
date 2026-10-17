@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Alert, GameState, MudStatusParams, OpenClawPluginApi } from "../core/types.js";
+import { isProcessRunning } from "../infra/process-guard.js";
 import { resolveSessionDir } from "../lib/session-key.js";
 import { getMudSessionStore } from "../storage/session-store.js";
 
@@ -24,12 +25,7 @@ export function registerMudStatusTool(api: OpenClawPluginApi): void {
       const stateFile = path.join(dir, "state.json");
       const alertsFile = path.join(dir, "alerts.json");
 
-      let pidRunning = false;
-      try {
-        const pid = parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
-        process.kill(pid, 0);
-        pidRunning = true;
-      } catch {}
+      const pidRunning = isProcessRunning(pidFile) !== null;
 
       let state: Partial<GameState> = {};
       try {

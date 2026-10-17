@@ -1,6 +1,8 @@
 import { registerMudCommand } from "./commands/mud-command.js";
 import type { OpenClawPluginApi } from "./core/types.js";
+import { registerModelRouteHook } from "./hooks/model-route.js";
 import { registerSessionModeHook } from "./hooks/session-mode.js";
+import { registerSubagentPolicyHook } from "./hooks/subagent-policy.js";
 import { configureMudStorage } from "./storage/session-store.js";
 import { registerMudTools } from "./tools/index.js";
 
@@ -13,6 +15,8 @@ export default {
     configureMudStorage(storageDir);
     registerMudCommand(api);
     registerSessionModeHook(api);
+    registerModelRouteHook(api);
+    registerSubagentPolicyHook(api);
     registerMudTools(api);
   },
 };

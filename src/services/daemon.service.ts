@@ -7,12 +7,15 @@ import fs from "node:fs";
 import net from "node:net";
 import { decode, encode, stripAnsi } from "../core/encoding.js";
 import { detectLoginAction } from "../core/login-handler.js";
-import { parseState } from "../core/state-parser.js";
+import { isLogNoiseLine } from "../core/noise-filter.js";
+import { liveSampleGate, resetRuntimeState } from "../core/state-parser.js";
 import { checkTriggers } from "../core/triggers.js";
 import type { Alert, GameState, MudConfig, MudPaths, ShutdownReason } from "../core/types.js";
+import { writeStopSignal } from "../infra/control-signal.js";
 import { appendOutput, loadJSON, writeJSON } from "../infra/file-store.js";
 import { Logger } from "../infra/logger.js";
-import { removePid, writePid } from "../infra/process-guard.js";
+import { acquirePidLock, isProcessRunning, removePid } from "../infra/process-guard.js";
+import { type QueueItem, readQueueFile, withQueueLock, writeQueueFile } from "../infra/send-queue.js";
 
 export interface DaemonOptions {
   paths: MudPaths;
@@ -24,6 +27,10 @@ const BASE_DELAY = 15_000;
 const MAX_DELAY = 300_000;
 const IDLE_TIMEOUT = 30 * 60 * 1000; // 30 分钟
 const EMPTY_CRED_GRACE = 60_000; // 60 秒
+// 队列文件里每个请求的派发时刻按时间保留：调用方（mud_act）最长等待远小于这个窗口，窗口内的记录不会因为并发请求多而被挤掉；
+// 条数上限只是极端情况下的体积保护
+const DRAIN_RECORD_TTL_MS = 10 * 60 * 1000;
+const DRAIN_HISTORY_HARD_CAP = 2000;
 
 // ── 登录延迟常量 ─────────────────────────────────────────────
 const LOGIN_CUSTOM_DELAY = 200; // loginSequence 自定义步骤（服务端等待窗口较短）
@@ -53,8 +60,16 @@ const SHUTDOWN_ALERT_MAP: Partial<
 export function startDaemon(opts: DaemonOptions): void {
   const { paths } = opts;
 
-  fs.mkdirSync(paths.root, { recursive: true });
-  writePid(paths.pid);
+  // 目录不在就是被 normalize:sessions 迁移/归档了（派生方在维护锁内已确认过它存在）：拒绝启动，不能把旧路径重建出来
+  if (!fs.existsSync(paths.root)) {
+    console.error(`[daemon] 会话目录不存在（${paths.root}），可能已被迁移/归档，拒绝启动。`);
+    process.exit(1);
+  }
+
+  if (!acquirePidLock(paths.pid)) {
+    console.error("[daemon] 另一个 daemon 已在运行（PID 锁获取失败），拒绝启动。");
+    process.exit(1);
+  }
 
   const heartbeatFile = paths.heartbeat;
   const heartbeatInterval = setInterval(() => {
@@ -85,24 +100,30 @@ export function startDaemon(opts: DaemonOptions): void {
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let emptyCredTimer: ReturnType<typeof setTimeout> | null = null;
   let wasLoggedIn = false; // 本次连接是否登录成功过
+  let hasLiveHp = false; // 本进程是否已从服务器输出解析到血量（边沿触发器基线）
 
-  let state: Partial<GameState> = loadJSON(paths.state, {
-    connected: false,
-    loginDone: false,
-    hp: null,
-    maxHp: null,
-    mp: null,
-    maxMp: null,
-    level: null,
-    gold: null,
-    exits: [],
-    location: "",
-    lastSeen: null,
-  });
+  let state: Partial<GameState> = resetRuntimeState(
+    loadJSON(paths.state, {
+      connected: false,
+      loginDone: false,
+      hp: null,
+      maxHp: null,
+      mp: null,
+      maxMp: null,
+      level: null,
+      gold: null,
+      exits: [],
+      location: "",
+      lastSeen: null,
+    }),
+  );
 
   function saveState(): void {
     writeJSON(paths.state, { ...state, lastSeen: new Date().toISOString() });
   }
+  // 上一个进程被 SIGKILL / 掉电留下的 connected=true/loginDone=true 要立即落盘：
+  // 否则连上之前切到自动模式，autopilot 会读到旧登录状态跳过 waitForLogin，在本次登录完成前就往队列发游戏命令。
+  saveState();
 
   function resetIdleTimer(): void {
     if (idleTimer) clearTimeout(idleTimer);
@@ -113,13 +134,39 @@ export function startDaemon(opts: DaemonOptions): void {
   }
 
   function drainQueue(socket: net.Socket, enc: string): void {
-    const queue = loadJSON<{ items: Array<{ cmd?: string }> }>(paths.queue, {
-      items: [],
-    });
-    if (!queue.items || queue.items.length === 0) return;
-
-    const toSend = queue.items;
-    writeJSON(paths.queue, { items: [] });
+    // 读-清-记在队列锁内完成：生产者（mud_act / mud_send / autopilot）同样在锁内读改写，谁也不会用旧快照覆盖对方。
+    // 锁被占超过超时（生产者进程被挂起、文件系统卡顿）只是可重试的延迟：跳过本次排水，下一个周期再来，不能让它变成崩溃退出。
+    let toSend: QueueItem[];
+    try {
+      toSend = withQueueLock(paths.queue, () => {
+        const queue = readQueueFile(paths.queue);
+        if (queue.items.length === 0) return [];
+        // 先清队列并记下派发时刻（在 socket.write 之前）：mud_act 用它做响应读取游标，
+        // 否则快速服务器在 mud_act 下一次轮询前返回的响应会被当成“派发前”的环境消息过滤掉。
+        // 每个请求（按入队时刻）单独记一份：两批命令在调用方轮询前先后排水时，前一批不能拿到后一批的时刻。
+        const drainedAt = new Date().toISOString();
+        const cutoff = Date.parse(drainedAt) - DRAIN_RECORD_TTL_MS;
+        const drains = Object.fromEntries(
+          Object.entries(queue.drains ?? {})
+            .filter(([, at]) => {
+              const t = Date.parse(at);
+              return Number.isNaN(t) || t >= cutoff;
+            })
+            .slice(-DRAIN_HISTORY_HARD_CAP),
+        );
+        // 同一毫秒入队的两个 mud_act 请求 time 相同：按请求 id 记派发时刻，没有 id 的（mud_send / CLI）退回 time
+        for (const item of queue.items) {
+          const key = item.id ?? item.time;
+          if (key) drains[key] = drainedAt;
+        }
+        writeQueueFile(paths.queue, { items: [], drainedAt, drains });
+        return queue.items;
+      });
+    } catch (error) {
+      logger.log("WARN", `队列锁暂不可用，本次跳过排水：${(error as Error).message}`);
+      return;
+    }
+    if (toSend.length === 0) return;
 
     for (const item of toSend) {
       const cmd = item.cmd;
@@ -142,6 +189,8 @@ export function startDaemon(opts: DaemonOptions): void {
   }
 
   function connect(): void {
+    // 新连接的首份状态不能拿旧连接的低血状态做边沿基线，否则断线重连后仍低血会被 true → true 吃掉。
+    hasLiveHp = false;
     const cfg = loadJSON<MudConfig | null>(paths.config, null);
     if (!cfg) {
       logger.log("ERROR", "未找到配置文件");
@@ -190,13 +239,19 @@ export function startDaemon(opts: DaemonOptions): void {
       if (!lines.length) return;
       appendOutput(paths.output, lines);
       for (const l of lines) {
-        process.stdout.write(`\x1b[90m${l}\x1b[0m\n`);
+        if (!isLogNoiseLine(l)) logger.log("GAME", l);
       }
-      state = parseState(lines, state);
+      // 边沿基线只用本进程观测到的实时血量：登录横幅等不含血量的首批输出不能拿上次运行持久化的快照制造假告警，
+      // 首批带血量的样本也不能拿旧快照做基线（重启后仍低血会被 true → true 吃掉）。
+      const gate = liveSampleGate(lines, state, hasLiveHp);
+      state = gate.state;
+      hasLiveHp = gate.hasLiveHp;
       saveState();
 
       const alerts = loadJSON<Alert[]>(paths.alerts, []);
-      const result = checkTriggers(lines, state, alerts);
+      const result = checkTriggers(lines, gate.triggerState, alerts, gate.prevState, {
+        firstLiveSample: gate.hasLiveHp && gate.prevState === undefined,
+      });
       if (result.changed) {
         writeJSON(paths.alerts, result.alerts);
         for (const a of result.alerts.filter((x) => !alerts.some((old) => old.time === x.time))) {
@@ -275,6 +330,8 @@ export function startDaemon(opts: DaemonOptions): void {
       lastLoginField = undefined;
       loginActionPending = false;
       state.connected = false;
+      // 持久化的 loginDone 也要清：否则重连后先写入 connected=true 时 autopilot 会把上次连接的 loginDone 当成本次已登录。
+      state.loginDone = false;
       saveState();
       if (rawBufTimer) {
         clearTimeout(rawBufTimer);
@@ -352,14 +409,29 @@ export function startDaemon(opts: DaemonOptions): void {
     logger.log("INFO", `Shutting down: ${reason}`);
 
     // 在关机前写入 alert 通知（仅限异常原因）
-    writeShutdownAlert(reason);
+    try {
+      writeShutdownAlert(reason);
+    } catch {}
 
-    // 写入关机原因到 state.json
+    // 写入关机原因到 state.json（try-catch 防 uncaughtException 路径下的二次异常）
     state.connected = false;
     state.loginDone = false;
     state.shutdownReason = reason;
     state.shutdownAt = new Date().toISOString();
-    saveState();
+    try {
+      saveState();
+    } catch {}
+
+    // 联停 autopilot：只在 autopilot 确实在跑时写 stop 信号，让它下轮循环退出，
+    // 不用等 disconnectGraceSec 超时。没有 autopilot 时不能留下 stop 文件，
+    // 否则下次切 semi-auto / full-auto 新起的 autopilot 首轮就会被它退出。
+    try {
+      if (isProcessRunning(paths.autopilotPid)) {
+        writeStopSignal(paths.autopilotControl, { force: true });
+      } else {
+        fs.rmSync(paths.autopilotControl, { force: true });
+      }
+    } catch {}
 
     if (sock) {
       try {
@@ -377,11 +449,21 @@ export function startDaemon(opts: DaemonOptions): void {
     } catch {}
     removePid(paths.pid);
     logger.close();
-    process.exit(0);
+    process.exit(reason === "crash" ? 1 : 0);
   }
 
   process.on("SIGTERM", () => gracefulShutdown("signal"));
   process.on("SIGINT", () => gracefulShutdown("signal"));
+  process.on("uncaughtException", (err) => {
+    try {
+      logger.log("ERROR", `uncaughtException: ${err.message}\n${err.stack ?? ""}`);
+    } catch {}
+    gracefulShutdown("crash");
+  });
+  process.on("unhandledRejection", (reason) => {
+    logger.log("ERROR", `unhandledRejection: ${reason}`);
+    gracefulShutdown("crash");
+  });
 
   logger.log("INFO", `MUD Daemon 启动 (PID ${process.pid})`);
   connect();

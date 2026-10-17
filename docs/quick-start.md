@@ -2,7 +2,7 @@
 
 ## 前提条件
 
-- Node.js v18+（`node --version` 确认）
+- Node.js >= 20.19.0（`node --version` 确认）
 - 支持的 AI 工具：Claude Code、OpenCode（或其他加载 SKILL.md 的工具）
 
 ---
@@ -15,6 +15,7 @@ cd mud-agent && bash install.sh
 ```
 
 安装会把运行时脚本复制到 `~/.mud-agent/` 并安装 `iconv-lite` 依赖。
+现在安装的是最新 `dist/` bundle + root shim，而不是一份独立维护的旧 `mud-ctl.js` 脚本。
 
 **自定义安装目录**：
 
@@ -44,6 +45,39 @@ $CTL start
 # 3. 等待连接，读取欢迎界面
 sleep 4 && $CTL read 30
 ```
+
+若要操作某个 Telegram topic 对应的独立会话，可追加 `--session`：
+
+```bash
+node ~/.mud-agent/mud-ctl.js status --session 'agent:main:telegram:group:-100xxxxxxxxxx:topic:<id>'
+```
+
+推荐只使用 canonical SessionKey：
+
+- Telegram 群 Topic：`agent:main:telegram:group:<chatId>:topic:<topicId>`
+- Telegram 私聊：`agent:main:telegram:direct:<chatId>`
+- 像 `topic-<id>`、`telegram:-100...:<id>` 这类旧别名只保留兼容，不要再新建
+
+若历史上已经存在 v1 编码目录或旧别名目录，可在仓库里执行：
+
+```bash
+# 先看 dry-run 报告
+npm run normalize:sessions
+
+# 确认 registry ownership、legacy case-fold 和 planned v2 目标均无冲突后再 apply
+npm run normalize:sessions:apply
+```
+
+新目录使用小写十六进制 `v2_` 编码；旧 `v1_` base64url 只保留解码与迁移。若 dry-run 的
+`legacyCaseFoldCollisions`、`registryOwnershipConflicts` 或 `invalidEncodedDirs` 非空，或 apply 报 planned
+v2 目标冲突，不要手工覆盖目录；先根据 registry 和目录内容确认数据归属。规范但无 owner 的 v2 会列入
+`skippedEncodedDirs` 与 `unmanagedDirs`，即使使用 `--archive-unmanaged` 也不会移动。alias owner 按共享
+路由归一化判断，`topic:1` / `topic-1` 等价形式不能分属不同 owner。apply 在完整预检后事务化执行；
+目录移动、registry 或 manifest 写入失败时会尝试恢复原目录与 registry。完整回滚成功时只清本事务的
+backup；若反向移动或 registry 恢复失败，错误中的 recovery path 会保留 registry、migration / archive
+副本与 `recovery.json`。反向移动仅在 destination 存在且 source 不存在时执行；destination 丢失或 source
+被并发重建会报告 state conflict，且绝不覆盖该 source。必须先据 recovery path 人工恢复，不要删除该目录。
+完整迁移合同见 [README](../README.md#session-存储与-transcript-边界)。
 
 ### 编码选择
 

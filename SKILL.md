@@ -12,7 +12,7 @@ compatibility:
   - opencode
   - openclaw  # 以 OpenClaw 插件方式运行，见 openclaw.plugin.json
 install:
-  runtime: "cd $SKILL_DIR && npm install && npm run build"
+  runtime: "bash install.sh"
   data_dir: "~/.mud-agent  # 可通过 MUD_DIR 环境变量覆盖"
 ---
 
@@ -33,16 +33,16 @@ install:
 
 ```bash
 # 检查是否已安装
-which mud-ctl 2>/dev/null && echo "READY" || echo "NEED_INSTALL"
+test -f ~/.mud-agent/mud-ctl.js && echo "READY" || echo "NEED_INSTALL"
 ```
 
 如果需要安装：
 
 ```bash
-cd "$SKILL_DIR" && npm install && npm run build
+bash "$SKILL_DIR/install.sh"
 ```
 
-安装后所有命令均使用 `mud-ctl <子命令>`。
+`install.sh` 会编译 `dist/`，并把运行时同步到 `~/.mud-agent/`（含 `mud-ctl.js` / `mud-daemon.js` / `autopilot.js` shim）。本文档中的 `mud-ctl` 均指 `node ~/.mud-agent/mud-ctl.js`，命令写作 `mud-ctl <子命令>`。
 
 ---
 
@@ -226,15 +226,17 @@ mud-ctl restart
 
 登录成功后，**立刻告知用户当前模式**，再根据用户意图切换：
 
-> "已登录！现在是**互动模式** — 你决定去哪、做什么，我来操作和解读。想让我自动探索的话，随时说。"
+> "已登录！现在是**陪伴模式（companion）** — 你决定去哪、做什么，我来操作和解读。想让我自动探索的话，随时说。"
 
 ### 三种模式
 
 | 模式 | 触发语言（示例） | 主 Agent 行为 |
 |------|---------------|-------------|
-| **互动模式**（默认） | "我来操作" / "停下" / 直接发出动作指令 | 每步叙述，等用户决策 |
-| **半自动模式** | "你去探索，有意思的告诉我" / "帮我找找武器铺" | 启动执行层，读 report.md 汇报亮点，遇决策点叙事询问 |
-| **全自动模式** | "去练级，快死了叫我" / "自动刷经验" | 启动执行层，只在危险/关键决策时介入 |
+| **陪伴模式（companion）**（默认） | "我来操作" / "停下" / 直接发出动作指令 | 每步叙述，等用户决策 |
+| **半自动模式（semi-auto）** | "你去探索，有意思的告诉我" / "帮我找找武器铺" | 启动执行层，读 report.md 汇报亮点，遇决策点叙事询问 |
+| **全自动模式（full-auto）** | "去练级，快死了叫我" / "自动刷经验" | 启动执行层，只在危险/关键决策时介入 |
+
+`/mud mode <companion|semi-auto|full-auto> [exploration|grinding]` 可手动切换（OpenClaw）。
 
 ### 用户插话处理（任何模式均适用）
 
@@ -266,9 +268,9 @@ mud-ctl state     # 实时角色状态
 
 ---
 
-## 互动模式：核心游戏循环
+## 陪伴模式：核心游戏循环
 
-进入互动模式后的每轮节奏：
+进入陪伴模式后的每轮节奏：
 
 ### 每轮节奏
 
@@ -355,6 +357,7 @@ mud-ctl state     # 获取角色状态
 
 ```bash
 CTL=mud-ctl
+# session 目录维护在仓库里跑 `npm run normalize:sessions`，不属于 mud-ctl 子命令
 
 # 状态
 $CTL status            # 守护进程完整状态
@@ -385,6 +388,30 @@ $CTL decisions                      # 查看待决策事项
 $CTL decisions-resolve <id> <选项>  # 解决决策，autopilot 收到后继续
 $CTL report [N]                     # 查看叙事日志最近 N 行（默认 50）
 ```
+
+---
+
+## 模型与宿主路由
+
+本 Skill 对模型的要求：
+
+- 函数 / 工具调用稳定可靠，参数不乱填
+- 首 token 延迟低，游戏回合不拖沓
+- 中文叙事流畅自然
+
+**OpenClaw**：插件注册 `before_model_resolve` hook。只要当前会话是已注册的 MUD 会话（`/mud start` 建过 session 目录，不要求守护进程正在运行），就把模型切到插件配置项 `model`（配置路径 `plugins.entries.mud-agent.config.model`，格式 `provider/model`，例如 `<provider>/deepseek-flash`）。该项**必须显式配置**：未配置或空字符串时插件不注册覆盖，会话沿用 Agent 默认模型。这样上线、下线这两个发生在守护进程启动前 / 停止后的回合也走低延迟模型（实测它们落在默认模型上最慢）。`/mud reset` 删掉目录后该话题回到 agent 默认模型。MUD 提示词注入仍然只在守护进程存活时发生。
+
+OpenClaw 2026.10.3 起，非内置插件必须设置 `plugins.entries.mud-agent.hooks.allowConversationAccess: true`，否则 `before_prompt_build` 和 `before_model_resolve` 都被静默拦截，提示词注入和模型覆盖一起失效。
+
+推荐在 `~/.openclaw/openclaw.json` 里把 `agents.defaults.models["<provider>/deepseek-flash"].params.thinking` 设为 `"high"`：2026-10-14 实测各档位延迟差异都在噪声内，high 不增加延迟，又保留最多推理。生效与否看 gateway 日志里有没有 `[hooks] model overridden to deepseek-flash`。
+
+**Claude Code / opencode**：用宿主当前运行的模型，Skill 不指定。
+
+考虑过但没采用的方案：
+
+- 改 `agents.defaults.model`：会影响所有频道
+- 单独建 agent，按 Topic 配 `agentId`：sessionKey 前缀会离开 `agent:main:`，session key 归一化和 session 目录都依赖这个前缀
+- 每个会话手动 `/model`：要人工操作，而且每个 Topic 都得来一遍
 
 ---
 

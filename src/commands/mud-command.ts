@@ -1,9 +1,21 @@
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import type { OpenClawCommandContext, OpenClawPluginApi } from "../core/types.js";
-import { resolveSessionKey } from "../lib/session-key.js";
+import { fileURLToPath } from "node:url";
+import type { GameMode, OpenClawCommandContext, OpenClawPluginApi } from "../core/types.js";
+import { launchAutopilotAsync, respawnAutopilotWhenDaemonReady } from "../infra/autopilot-launcher.js";
+import { readGameModeRecord, signalAutopilotStop, writeGameMode, writeStopSignal } from "../infra/control-signal.js";
+import { launchDaemon } from "../infra/daemon-launcher.js";
+import { isProcessRunning } from "../infra/process-guard.js";
+import { saveNotifyTargetFromCommandContext } from "../lib/notify-target.js";
+import { resolveSessionDir, resolveSessionKey } from "../lib/session-key.js";
+import { parseTcpPort } from "../lib/tcp-port.js";
 import { getMudSessionStore } from "../storage/session-store.js";
+
+// ESM 下 __dirname 不是全局变量，但 @types/node 把它登记为全局声明，
+// 所以 tsc / biome / vitest 都不会抱怨；真跑到 spawn 路径上才会
+// ReferenceError。必须显式从 import.meta.url 解出一份。
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 function helpText(): string {
   return [
@@ -75,30 +87,77 @@ export function registerMudCommand(api: OpenClawPluginApi): void {
       if (action === "help") return { text: helpText() };
 
       if (action === "where") {
-        return { text: `SessionKey: ${sessionKey}\nStorageRoot: ${store.getStorageRoot()}` };
+        return {
+          text: `SessionKey: ${sessionKey}\nSessionDir: ${resolveSessionDir(store, sessionKey)}\nStorageRoot: ${store.getStorageRoot()}`,
+        };
       }
 
       if (action === "reset") {
-        const dir = store.getSessionDataDir(sessionKey);
+        const dir = resolveSessionDir(store, sessionKey);
         if (fs.existsSync(dir)) {
           fs.rmSync(dir, { recursive: true, force: true });
         }
         return { text: "OK: session data cleared" };
       }
 
-      store.ensure(sessionKey);
-      const dir = store.getSessionDataDir(sessionKey);
+      // 只读 / 只发信号的子命令不注册会话：目录存在就是模型路由的门控，一次 /mud status 不能把话题永久变成 MUD 会话。
+      if (action === "status") {
+        const dir = resolveSessionDir(store, sessionKey);
+        return { text: `Daemon: ${isProcessRunning(path.join(dir, "mud-daemon.pid")) ? "running" : "stopped"}` };
+      }
+
+      if (action === "stop") {
+        const dir = resolveSessionDir(store, sessionKey);
+        // 先联停 autopilot：daemon 已经意外死掉时只写 control.json 没人消费，autopilot 会一直按旧状态排队
+        const apid = signalAutopilotStop(dir);
+        const sessionControlFile = path.join(dir, "control.json");
+        const stopPayload = JSON.stringify({ action: "stop" });
+        try {
+          fs.writeFileSync(sessionControlFile, stopPayload);
+        } catch {}
+        // Broadcast to flat root too: supports legacy Claude Code CLI mode
+        // (mud-ctl.js flat layout where daemon watches ~/.mud-agent/control.json directly)
+        const flatControlFile = path.join(getMudSessionStore().getStorageRoot(), "control.json");
+        try {
+          fs.writeFileSync(flatControlFile, stopPayload);
+        } catch {}
+        return { text: apid ? `OK: stop signal sent (autopilot PID ${apid} signalled too)` : "OK: stop signal sent" };
+      }
+
+      // 只有 /mud start 注册会话，且先校验请求再注册：host:port 格式错误或既无参数也无已有配置时不建目录，
+      // 否则这个失败的话题会被永久当成 MUD 会话（目录存在即注册）。/mud mode 对未初始化的话题直接报错。
+      if (action === "start") {
+        const hostPort = args[1];
+        if (hostPort) {
+          const [host, port] = hostPort.split(":");
+          if (!host || parseTcpPort(port) === null)
+            return {
+              text: "ERROR: format should be host:port (port 1-65535)  e.g. /mud start mud.pkuxkx.net:8081 utf8",
+            };
+        } else if (!fs.existsSync(path.join(resolveSessionDir(store, sessionKey), "config.json"))) {
+          return { text: "ERROR: no server configured. Use /mud start host:port [encoding]" };
+        }
+        // 已注册且目录在：不再 ensure()；首次注册 / 目录丢失走异步锁（同步锁会在网关里 Atomics.wait，
+        // 与正在 launchDaemon() 内持锁等 PID 的另一个 start 互相卡住）
+        if (!store.get(sessionKey) || !fs.existsSync(resolveSessionDir(store, sessionKey))) {
+          await store.ensureAsync(sessionKey);
+        }
+      }
+      const dir = resolveSessionDir(store, sessionKey);
+      if (!fs.existsSync(dir)) {
+        return { text: "ERROR: this topic has no MUD session yet. Run /mud start host:port first." };
+      }
 
       if (action === "start") {
+        saveNotifyTargetFromCommandContext(dir, ctx);
         const hostPort = args[1];
         const encoding = args[2] || "utf8";
         const configFile = path.join(dir, "config.json");
 
         let serverStr = "existing config";
         if (hostPort) {
-          const [host, port] = hostPort.split(":");
-          if (!host || !port)
-            return { text: "ERROR: format should be host:port  e.g. /mud start mud.pkuxkx.net:8081 utf8" };
+          const [host, port] = hostPort.split(":") as [string, string];
+          const tcpPort = parseTcpPort(port) as number;
           // 保留已有的 loginSequence，避免重新 start 时把登录步骤清空
           let existingLoginSequence: unknown[] = [];
           try {
@@ -108,7 +167,7 @@ export function registerMudCommand(api: OpenClawPluginApi): void {
             }
           } catch {}
           const cfg = {
-            server: { host, port: parseInt(port, 10), encoding },
+            server: { host, port: tcpPort, encoding },
             credentials: { username: "", password: "" },
             loginSequence: existingLoginSequence,
           };
@@ -124,55 +183,37 @@ export function registerMudCommand(api: OpenClawPluginApi): void {
         }
 
         const pidFile = path.join(dir, "mud-daemon.pid");
-        try {
-          const pid = parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
-          process.kill(pid, 0);
-          return { text: `OK: daemon already running (PID ${pid})` };
-        } catch {}
+        // 身份核对（记录带启动时刻时与 OS 报告一致才算活）：崩溃遗留、号码被复用的记录不会让 start 误报"已在运行"
+        const runningPid = isProcessRunning(pidFile);
+        if (runningPid) {
+          const pid = runningPid;
+          const auto = ["semi-auto", "full-auto"].includes(readGameModeRecord(dir)?.mode ?? "");
+          if (auto) respawnAutopilotWhenDaemonReady(store.getStorageRoot(), dir);
+          const note = auto
+            ? "\nAutomatic mode is set; the autopilot will be restored if missing (see autopilot.log)."
+            : "";
+          return { text: `OK: daemon already running (PID ${pid})${note}` };
+        }
 
         const daemonScript = path.resolve(__dirname, "../../dist/cli/daemon-entry.js");
-        const logFile = path.join(dir, "daemon.log");
-        const out = fs.openSync(logFile, "a");
-        const child = spawn("node", [daemonScript], {
-          detached: true,
-          stdio: ["ignore", out, out],
-          env: { ...process.env, MUD_DIR: dir },
-        });
-        child.unref();
-        fs.closeSync(out);
+        const launched = await launchDaemon(store.getStorageRoot(), dir, daemonScript);
+        if (!launched.ok) return { text: `ERROR: ${launched.reason}` };
+        if (launched.alreadyRunning) return { text: `OK: daemon already running (PID ${launched.pid})` };
+        const child = { pid: launched.pid };
+        const confirmNote = launched.confirmed ? "" : "\nDaemon PID was not confirmed within 10 s; check /mud status.";
+        const willRespawn = ["semi-auto", "full-auto"].includes(readGameModeRecord(dir)?.mode ?? "");
+        if (willRespawn) respawnAutopilotWhenDaemonReady(store.getStorageRoot(), dir);
+        const respawnNote = willRespawn
+          ? "\nAutomatic mode is set; the autopilot will be restored once the daemon is up (see autopilot.log)."
+          : "";
 
         return {
-          text: `OK: MUD daemon started (PID ${child.pid})\nServer: ${serverStr}\n\nTell AI: "show me the current game screen" to begin.\n\n⚠️  Credentials are saved in plain text (~/.mud-agent/config.json). Do not sync this directory to cloud storage.`,
+          text: `OK: MUD daemon started (PID ${child.pid})${confirmNote}${respawnNote}\nServer: ${serverStr}\n\nTell AI: "show me the current game screen" to begin.\n\n⚠️  Credentials are saved in plain text (~/.mud-agent/config.json). Do not sync this directory to cloud storage.`,
         };
       }
 
-      if (action === "status") {
-        const pidFile = path.join(dir, "mud-daemon.pid");
-        let pidRunning = false;
-        try {
-          const pid = parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
-          process.kill(pid, 0);
-          pidRunning = true;
-        } catch {}
-        return { text: `Daemon: ${pidRunning ? "running" : "stopped"}` };
-      }
-
-      if (action === "stop") {
-        const sessionControlFile = path.join(dir, "control.json");
-        const stopPayload = JSON.stringify({ action: "stop" });
-        try {
-          fs.writeFileSync(sessionControlFile, stopPayload);
-        } catch {}
-        // Broadcast to flat root too: supports legacy Claude Code CLI mode
-        // (mud-ctl.js flat layout where daemon watches ~/.mud-agent/control.json directly)
-        const flatControlFile = path.join(getMudSessionStore().getStorageRoot(), "control.json");
-        try {
-          fs.writeFileSync(flatControlFile, stopPayload);
-        } catch {}
-        return { text: "OK: stop signal sent" };
-      }
-
       if (action === "mode") {
+        saveNotifyTargetFromCommandContext(dir, ctx);
         const modeArg = args[1];
         const styleArg = args[2] || "exploration";
 
@@ -197,50 +238,48 @@ export function registerMudCommand(api: OpenClawPluginApi): void {
           return { text: `ERROR: invalid style "${styleArg}". Use: exploration | grinding` };
         }
 
-        // 写 game-mode.json
-        const gameModeFile = path.join(dir, "game-mode.json");
-        fs.writeFileSync(gameModeFile, JSON.stringify({ mode: modeArg }, null, 2));
+        // daemon 没在跑时不能落自动模式：autopilot 会立即退出，模式文件却显示自动。
+        if (modeArg !== "companion" && !isProcessRunning(path.join(dir, "mud-daemon.pid"))) {
+          return {
+            text: "ERROR: daemon is not running. Start it (and log in) first, then switch to semi-auto / full-auto.",
+          };
+        }
+
+        // 写 game-mode.json（带代际）；写之前先记下边界时刻，晚于它的 stop（并发的 companion 请求）不会被当成遗留物清掉。
+        const launchTs = Date.now();
+        // 模式与 autopilot 配置在同一把锁内一起提交：并发的两个 set-mode 不会出现"新模式 + 旧配置"
+        const noticeTypes = ["rare_item", "boss", "puzzle", "level_up"];
+        const autopilotConfigData =
+          modeArg === "companion"
+            ? undefined
+            : { style: styleArg, pauseOn: modeArg === "semi-auto" ? noticeTypes : [], notifyOn: noticeTypes }; // 全自动不暂停，但 boss / 稀有物品仍要播报
+        const modeGeneration = writeGameMode(dir, modeArg as GameMode, autopilotConfigData);
 
         if (modeArg === "companion") {
-          // 切到陪伴模式：向 autopilot 发停止信号
+          // 切到陪伴模式：向 autopilot 发停止信号，记下所属模式代际
           const autopilotControlFile = path.join(dir, "autopilot-control.json");
           try {
-            fs.writeFileSync(autopilotControlFile, JSON.stringify({ action: "stop" }));
+            writeStopSignal(autopilotControlFile, { modeGeneration });
           } catch {}
           return { text: "OK: switched to companion mode. Autopilot stop signal sent. You are now in control." };
         }
 
-        // semi-auto 或 full-auto：写 autopilot-config.json，按需启动 autopilot
-        const pauseOn = modeArg === "semi-auto" ? ["rare_item", "boss", "puzzle", "level_up"] : [];
-        const autopilotConfigData = {
-          style: styleArg,
-          pauseOn,
-        };
-        const autopilotConfigFile = path.join(dir, "autopilot-config.json");
-        fs.writeFileSync(autopilotConfigFile, JSON.stringify(autopilotConfigData, null, 2));
-
+        // semi-auto 或 full-auto：配置已随模式一起落盘，按需启动 autopilot
         // 检查 autopilot 是否已在运行
-        const autopilotPidFile = path.join(dir, "autopilot.pid");
-        let autopilotRunning = false;
-        try {
-          const pid = parseInt(fs.readFileSync(autopilotPidFile, "utf8").trim(), 10);
-          process.kill(pid, 0);
-          autopilotRunning = true;
-        } catch {}
+        const autopilotRunning = isProcessRunning(path.join(dir, "autopilot.pid")) !== null;
 
         if (!autopilotRunning) {
-          const autopilotScript = path.resolve(__dirname, "../../dist/cli/autopilot-entry.js");
-          const autopilotLogFile = path.join(dir, "autopilot.log");
-          const out = fs.openSync(autopilotLogFile, "a");
-          const child = spawn("node", [autopilotScript], {
-            detached: true,
-            stdio: ["ignore", out, out],
-            env: { ...process.env, MUD_DIR: dir },
-          });
-          child.unref();
-          fs.closeSync(out);
+          if (readGameModeRecord(dir)?.generation !== modeGeneration) {
+            return { text: "WARN: mode was rewritten by a newer set-mode; autopilot not started by this request." };
+          }
+          const launched = await launchAutopilotAsync(store.getStorageRoot(), dir, launchTs);
+          if (!launched.ok) {
+            return {
+              text: `WARN: switched to ${modeArg} mode (style: ${styleArg}) but autopilot did not start: ${launched.reason}`,
+            };
+          }
           return {
-            text: `OK: switched to ${modeArg} mode (style: ${styleArg}). Autopilot started (PID ${child.pid}).`,
+            text: `OK: switched to ${modeArg} mode (style: ${styleArg}). Autopilot started (PID ${launched.pid}).`,
           };
         }
 

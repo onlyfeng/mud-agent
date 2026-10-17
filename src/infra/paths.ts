@@ -28,5 +28,6 @@ export function buildPaths(mudDir: string): MudPaths {
     autopilotControl: path.join(mudDir, "autopilot-control.json"),
     autopilotLog: path.join(mudDir, "autopilot.log"),
     gameModeFile: path.join(mudDir, "game-mode.json"),
+    notifyTarget: path.join(mudDir, "notify-target.json"),
   };
 }

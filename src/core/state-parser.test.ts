@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { liveSampleGate, parseState, resetRuntimeState } from "./state-parser";
+import { compileGameProfile, DEFAULT_PROFILE_JSON, mergeGameProfileJson } from "./game-profile";
+import { liveSampleGate, maxHpUntrusted, parseState, resetRuntimeState } from "./state-parser";
+import { parseExitsFromLines } from "./text-analyzer";
 
 describe("parseState", () => {
   const emptyState = {
@@ -61,10 +63,74 @@ describe("parseState", () => {
     expect(s.maxHp).toBe(200);
   });
 
+  it("an optional exits capture group that did not participate means no exits, not a crash", () => {
+    const profile = compileGameProfile(
+      mergeGameProfileJson(DEFAULT_PROFILE_JSON, {
+        exits: { state: ["^Exits(?:[: ]+(.*))?$"], room: ["^Exits(?:[: ]+(.*))?$"] },
+      }),
+      "test",
+    );
+    expect(parseState(["Exits"], emptyState, profile).exits).toEqual([]);
+    expect(parseState(["Exits: north south"], emptyState, profile).exits).toEqual(["north", "south"]);
+    expect(parseExitsFromLines([{ ts: "t", text: "Exits" }], profile)).toEqual([]);
+    // 分隔符不含空白（","）：每个片段各自 trim，不把 " east" 原样当命令
+    const comma = compileGameProfile(
+      mergeGameProfileJson(DEFAULT_PROFILE_JSON, { exits: { state: ["^Exits: (.+)$"], splitter: "," } }),
+      "test",
+    );
+    expect(parseState(["Exits: north, east ,south"], emptyState, comma).exits).toEqual(["north", "east", "south"]);
+  });
+
+  it("hp/mp ignore a non-finite capture (Infinity, overflow) instead of persisting null", () => {
+    const profile = compileGameProfile(
+      mergeGameProfileJson(DEFAULT_PROFILE_JSON, { status: { hp: ["HP: (\\S+)/(\\S+)"] } }),
+      "test",
+    );
+    const prev = { ...emptyState, hp: 80, maxHp: 100 };
+    expect(parseState(["HP: Infinity/100"], prev, profile)).toMatchObject({ hp: 80, maxHp: 100 });
+    expect(parseState(["HP: 90/1e999"], prev, profile)).toMatchObject({ hp: 90, maxHp: 100 }); // 上限非有限：当作单值样本，沿用已知上限
+  });
+
+  it("level and gold ignore a non-numeric capture instead of writing NaN", () => {
+    const profile = compileGameProfile(
+      mergeGameProfileJson(DEFAULT_PROFILE_JSON, {
+        status: { level: ["Level: (unknown|\\d+)"], gold: ["Gold: (\\S+)"] },
+      }),
+      "test",
+    );
+    const prev = { ...emptyState, level: 10, gold: 50 };
+    expect(parseState(["Level: unknown", "Gold: lots"], prev, profile)).toMatchObject({ level: 10, gold: 50 });
+    expect(parseState(["Level: 12", "Gold: 7"], prev, profile)).toMatchObject({ level: 12, gold: 7 });
+  });
+
+  it("maxHpUntrusted (autopilot's refresh rule): unknown, untimestamped (pre-upgrade state) or older than the TTL", () => {
+    const now = new Date("2026-10-17T10:00:00.000Z");
+    const fresh = new Date(now.getTime() - 60_000).toISOString();
+    const stale = new Date(now.getTime() - 6 * 60_000).toISOString();
+    expect(maxHpUntrusted({ hp: 80, maxHp: null }, now.getTime())).toBe(true);
+    expect(maxHpUntrusted({ hp: 80, maxHp: 100, maxHpSampledAt: fresh }, now.getTime())).toBe(false);
+    expect(maxHpUntrusted({ hp: 80, maxHp: 100, maxHpSampledAt: stale }, now.getTime())).toBe(true);
+    expect(maxHpUntrusted({ hp: 80, maxHp: 100 }, now.getTime())).toBe(true); // 旧 state.json 没有样本时刻
+    expect(maxHpUntrusted({ hp: null, maxHp: null }, now.getTime())).toBe(true); // 刚登录还没有任何血量样本：先查状态再动
+    // daemon 的触发器继续用已有上限（闲置时上限不会变；活动时样本会刷新）：liveSampleGate 不做保鲜判断
+    const staleState = { ...emptyState, hp: 30, maxHp: 100, maxHpSampledAt: stale };
+    expect(liveSampleGate(["生命值：30"], staleState, true, undefined, now).triggerState.maxHp).toBe(100);
+  });
+
+  it("applies status and exits rules per line, so ^…$-anchored profile rules match inside a multi-line batch", () => {
+    const profile = compileGameProfile(
+      mergeGameProfileJson(DEFAULT_PROFILE_JSON, {
+        status: { hp: ["^HP: (\\d+)/(\\d+)$"] },
+        exits: { state: ["^Exits: (.+)$"] },
+      }),
+      "test",
+    );
+    const s = parseState(["The Town Square", "HP: 40/100", "Exits: north, east", "< prompt >"], emptyState, profile);
+    expect(s).toMatchObject({ hp: 40, maxHp: 100, exits: ["north", "east"] });
+  });
+
   it("handles empty lines", () => {
-    const s = parseState([], emptyState);
-    // 第一次解析固定角色等级基线（没有旧等级时为 null），其余字段不变
-    expect(s).toEqual({ ...emptyState, characterLevel: null });
+    expect(parseState([], emptyState)).toEqual(emptyState);
   });
 
   it("clears stale maxMp when new pattern has no max group (mp > maxMp 回归)", () => {
@@ -76,12 +142,20 @@ describe("parseState", () => {
     expect(s.maxMp).toBeNull();
   });
 
-  it("keeps a plausible known maxHp when the new pattern has no max group, clears it only when exceeded", () => {
+  it("a current-only HP sample keeps the known maximum (a trailing prompt must not erase a fresh max); exceeding it proves the max wrong", () => {
     const prevState = { ...emptyState, hp: 100, maxHp: 200 };
     const s = parseState(["生命值：80"], prevState);
     expect(s.hp).toBe(80);
-    expect(s.maxHp).toBe(200); // 触发器与安全边界都需要 maxHp，不能因为一次单值样本就丢掉
-    expect(parseState(["生命值：250"], prevState).maxHp).toBeNull(); // 上限已不可信
+    expect(s.maxHp).toBe(200);
+    expect(parseState(["生命值：250"], prevState).maxHp).toBeNull(); // 当前值超过上限：上限已被证伪
+    expect(parseState(["<  90 hp"], { ...emptyState, hp: 50, maxHp: 100 }).maxHp).toBe(100); // ROM 提示符只更新当前值
+    expect(parseState(["气血：80/300"], s).maxHp).toBe(300); // 双值样本总是重建上限
+    const at = new Date("2026-10-17T10:00:00.000Z");
+    const stamped = parseState(["气血：80/300"], s, undefined, at);
+    expect(stamped.maxHpSampledAt).toBe(at.toISOString()); // 双值样本打上时刻（autopilot 据此判断保鲜）
+    expect(parseState(["生命值：70"], stamped, undefined, new Date(at.getTime() + 1000)).maxHpSampledAt).toBe(
+      at.toISOString(),
+    ); // 单值样本不刷新它
   });
 
   it("updates both mp and maxMp when pattern has max group", () => {
@@ -122,100 +196,6 @@ describe("parseState", () => {
     const s = parseState([" 精神：  352/  352 (100%)"], emptyState);
     expect(s.mp).toBe(352);
     expect(s.maxMp).toBe(352);
-  });
-
-  it("drops the cached maximum on a current-only sample once level continuity is broken", () => {
-    const full = parseState(["气血：100/100", "等级：10"], emptyState);
-    expect(full.maxHp).toBe(100);
-    // 升级播报 + 单值样本：40/100 看起来像 40%，真实上限已变，必须放弃缓存
-    const levelled = parseState(["你升级了！", "生命值：40"], full);
-    expect(levelled.hp).toBe(40);
-    expect(levelled.maxHp).toBeNull();
-    // 解析到的等级与缓存不同，同样视为上限不连续
-    const otherLevel = parseState(["等级：11", "生命值：40"], full);
-    expect(otherLevel.maxHp).toBeNull();
-    expect(otherLevel.level).toBe(11);
-    // 等级未变的单值样本仍沿用上限
-    expect(parseState(["等级：10", "生命值：40"], full).maxHp).toBe(100);
-    // 别人升级的频道播报、技能"升为"都不是本角色升级：不能清掉上限
-    expect(parseState(["【闲聊】恭喜 示例玩家 升到了 30 级！", "生命值：40"], full).maxHp).toBe(100);
-    expect(parseState(["你的基本剑法升为第 5 级", "生命值：40"], full).maxHp).toBe(100);
-    expect(parseState(["恭喜你升级了！"], full).maxHp).toBeNull(); // 自己的升级仍算
-    expect(parseState(["你的等级升到了 11 级", "生命值：40"], full).maxHp).toBeNull(); // 所有格 + 升到
-    expect(parseState(["您的等级提升了"], full).maxHp).toBeNull();
-    expect(parseState(["你升到了 12 级"], full).maxHp).toBeNull();
-    // 带所有格/当前前缀的角色等级也算明确写法：10 → 11 是断裂，旧上限清掉
-    expect(parseState(["你的等级：11", "生命值：40"], full).maxHp).toBeNull();
-    expect(parseState(["您当前等级：11", "生命值：40"], full).maxHp).toBeNull();
-    expect(parseState(["您的当前等级：11", "生命值：40"], full).maxHp).toBeNull();
-    expect(parseState(["你的当前等级：11", "生命值：40"], full).maxHp).toBeNull();
-    expect(parseState(["You gain a level!", "生命值：40"], full).maxHp).toBeNull();
-    // 英文技能/公会等级同样不是角色等级
-    expect(parseState(["Skill Level 3", "生命值：40"], full).maxHp).toBe(100);
-    expect(parseState(["Guild Level 2 | Level 11", "生命值：40"], full).maxHp).toBe(100); // 没有玩家状态标签的「|」字段：不认
-    expect(parseState(["HP 100/100 | Level 11", "生命值：40"], full).maxHp).toBeNull(); // 玩家状态行里的「|」字段：认
-    expect(parseState(["山贼 | Level 20", "生命值：40"], full).maxHp).toBe(100); // 实体信息
-    expect(parseState(["Goblin | Lv. 20", "生命值：40"], full).maxHp).toBe(100);
-    expect(parseState(["Skill Lv. 3", "生命值：40"], full).maxHp).toBe(100);
-    expect(parseState(["HP 100/100 | Guild Lv 2 | Level 11", "生命值：40"], full).maxHp).toBeNull(); // 状态行里技能片段屏蔽后仍识别角色 Level
-    // 其他实体的等级（技能名 / 怪物 / 玩家名 + 空格 + 等级）不是本角色的：空格不是边界
-    expect(parseState(["基本剑法 等级：5", "生命值：40"], full).maxHp).toBe(100);
-    expect(parseState(["怪物 等级：20", "生命值：40"], full).maxHp).toBe(100);
-    expect(parseState(["张三 等级：99", "生命值：40"], full).maxHp).toBe(100);
-    expect(parseState(["【状态】 等级：11", "生命值：40"], full).maxHp).toBeNull(); // 标签后的字段仍算
-    expect(parseState(["生命值：40 等级：11"], full).maxHp).toBeNull(); // 空格分隔的字段：前一个字段的数值后面算边界
-    expect(parseState(["HP 100/100 等级 10"], full).maxHp).toBe(100); // 等级没变
-    expect(parseState(["山贼 HP 80 等级：20", "生命值：40"], full).maxHp).toBe(100); // 其他实体的状态：不以玩家状态字段开头
-    expect(parseState(["【状态】生命值：40 等级：11"], full).maxHp).toBeNull(); // 带标签的玩家状态行
-    expect(parseState(["[山贼] HP 80 等级：20", "生命值：40"], full).maxHp).toBe(100); // 实体名标签不是玩家状态标签
-    expect(parseState(["[status] HP 80/100 等级：11"], full).maxHp).toBeNull();
-    // 频道里别人的等级不是本角色的：不清上限
-    expect(parseState(["【闲聊】甲：等级：99", "生命值：40"], full).maxHp).toBe(100);
-    expect(parseState(["【世界】路人：角色等级：99", "生命值：40"], full).maxHp).toBe(100);
-    // 旧 state（升级前，只有 level/maxHp 没有 characterLevel）：第一批 10 → 11 也要清上限
-    const legacyState = { ...full, characterLevel: undefined } as GameState;
-    expect(parseState(["等级：11", "生命值：40"], legacyState).maxHp).toBeNull();
-    expect(parseState(["等级：10", "生命值：40"], legacyState).maxHp).toBe(100);
-    // 导入一次后基线固定：先来一批技能等级把 level 改成 3，再来真实的 等级：10 也不算断裂
-    const imported = parseState(["生命值：80/100"], legacyState);
-    expect(imported.characterLevel).toBe(10);
-    const skillPolluted = parseState(["技能等级：3"], imported);
-    expect(skillPolluted.level).toBe(3);
-    expect(skillPolluted.characterLevel).toBe(10);
-    expect(parseState(["等级：10", "生命值：40"], skillPolluted).maxHp).toBe(100);
-    // 标签式状态行：冒号也是边界
-    expect(parseState(["状态：等级：11", "生命值：40"], full).maxHp).toBeNull();
-    expect(parseState(["属性：角色等级：11", "生命值：40"], full).maxHp).toBeNull();
-    // 实体名 + 标点不是边界：查看目标得到的等级不是本角色的
-    expect(parseState(["山贼：等级：20", "生命值：40"], full).maxHp).toBe(100);
-    expect(parseState(["山贼，等级：20", "生命值：40"], full).maxHp).toBe(100);
-    expect(parseState(["属性：技能等级：11", "生命值：40"], full).maxHp).toBe(100); // 技能行仍排除
-    // 同一行既有技能等级又有角色等级：只屏蔽技能片段，角色等级 11 仍被识别
-    expect(parseState(["角色等级：11 技能等级：3 生命值：40"], full).maxHp).toBeNull();
-    expect(parseState(["技能等级：3 等级：10 生命值：40"], full).maxHp).toBe(100); // 角色等级没变
-    // 先收「技能等级：3」（污染展示值 level），再收真实的「等级：10」：基线是已确认的角色等级 10，不算断裂
-    const polluted = parseState(["技能等级：3"], full);
-    expect(polluted.level).toBe(3);
-    expect(parseState(["等级：10", "生命值：40"], polluted).maxHp).toBe(100);
-    // 「技能等级：3」是技能信息，不是角色等级：不能当成连续性断裂清掉上限
-    const skill = parseState(["技能等级：3", "生命值：40"], full);
-    expect(skill.maxHp).toBe(100);
-    expect(parseState(["你的基本拳脚 技能等级：7"], full).maxHp).toBe(100);
-    // 升级播报单独到达（本批无血量样本）：旧上限也要清掉，下一批单值样本不能再复用
-    const levelOnly = parseState(["你升级了！"], full);
-    expect(levelOnly.maxHp).toBeNull();
-    expect(parseState(["生命值：40"], levelOnly).maxHp).toBeNull();
-  });
-
-  it("keeps the known maximum on a current-only HP sample that fits under it", () => {
-    const full = parseState([" 气血：  200/  282 (70%)"], emptyState);
-    expect(full.maxHp).toBe(282);
-    const partial = parseState(["生命值：80"], full);
-    expect(partial.hp).toBe(80);
-    expect(partial.maxHp).toBe(282);
-    // 当前值超过已知上限：上限不再可信，置空
-    const over = parseState(["生命值：900"], full);
-    expect(over.maxHp).toBeNull();
   });
 
   it("resetRuntimeState drops stale shutdown marks, connection flags and last run's gameplay fields", () => {

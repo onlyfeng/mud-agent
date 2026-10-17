@@ -133,6 +133,8 @@ export function startDaemon(opts: DaemonOptions): void {
     }, IDLE_TIMEOUT);
   }
 
+  // 上限不可信（未知 / 陈旧）时由 daemon 自己发画像里的状态查询（陪伴模式没有 autopilot 也要刷新），最多每 20 s 一次。
+  // 由排水定时器每 500 ms 调用一次：服务器静默时保鲜期到了也能刷新、查询丢包也能重试，不依赖下一批输出
   function drainQueue(socket: net.Socket, enc: string): void {
     // 读-清-记在队列锁内完成：生产者（mud_act / mud_send / autopilot）同样在锁内读改写，谁也不会用旧快照覆盖对方。
     // 锁被占超过超时（生产者进程被挂起、文件系统卡顿）只是可重试的延迟：跳过本次排水，下一个周期再来，不能让它变成崩溃退出。

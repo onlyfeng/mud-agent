@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { STORAGE_ROOT_ENV } from "../core/game-profile.js";
 import { sleepSync } from "../lib/dir-lock-contract.mjs";
 import { acquireMigrationLockAsync, acquireMigrationLockSync } from "../lib/migration-lock-contract.mjs";
 import { clearStaleStopSignal, hasEffectiveStopSignal, LAUNCH_TS_ENV, readGameModeRecord } from "./control-signal.js";
@@ -26,7 +27,7 @@ export const AUTOPILOT_UNCONFIRMED_REASON = "autopilot 10 s 内未写入 PID，�
 
 type LaunchOptions = { confirmMs?: number; pollMs?: number };
 
-function spawnDetached(dir: string, launchTs: number): number | undefined {
+function spawnDetached(storageRoot: string, dir: string, launchTs: number): number | undefined {
   clearStaleStopSignal(path.join(dir, "autopilot-control.json"), { notNewerThan: launchTs });
   // 从项目根定位编译产物：本模块可能从 dist/infra 加载，也可能被宿主按 src/index.ts 直接加载（src/infra），两者的 ../../dist 都是项目根的 dist
   const entry = path.resolve(__dirname, "../../dist/cli/autopilot-entry.js");
@@ -34,7 +35,7 @@ function spawnDetached(dir: string, launchTs: number): number | undefined {
   const child = spawn("node", [entry], {
     detached: true,
     stdio: ["ignore", out, out],
-    env: { ...process.env, MUD_DIR: dir, [LAUNCH_TS_ENV]: String(launchTs) },
+    env: { ...process.env, MUD_DIR: dir, [LAUNCH_TS_ENV]: String(launchTs), [STORAGE_ROOT_ENV]: storageRoot },
   });
   child.unref();
   fs.closeSync(out);
@@ -68,7 +69,7 @@ export function launchAutopilot(
     const pidFile = path.join(dir, "autopilot.pid");
     const existing = isProcessRunning(pidFile);
     if (existing) return { ok: true, pid: existing };
-    const childPid = spawnDetached(dir, launchTs);
+    const childPid = spawnDetached(storageRoot, dir, launchTs);
     const deadline = Date.now() + (opts.confirmMs ?? DEFAULT_CONFIRM_MS);
     while (Date.now() < deadline && childPid && isChildRunning(childPid)) {
       if (confirmedChild(pidFile, childPid)) return { ok: true, pid: childPid };
@@ -99,7 +100,7 @@ export async function launchAutopilotAsync(
     const pidFile = path.join(dir, "autopilot.pid");
     const existing = isProcessRunning(pidFile);
     if (existing) return { ok: true, pid: existing };
-    const childPid = spawnDetached(dir, launchTs);
+    const childPid = spawnDetached(storageRoot, dir, launchTs);
     const deadline = Date.now() + (opts.confirmMs ?? DEFAULT_CONFIRM_MS);
     const tick = () => new Promise((resolve) => setTimeout(resolve, opts.pollMs ?? DEFAULT_POLL_MS));
     while (Date.now() < deadline && childPid && isChildRunning(childPid)) {

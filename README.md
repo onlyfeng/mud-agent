@@ -88,6 +88,35 @@ mud-agent/
 | `alerts.json` | 触发器警报队列 |
 | `daemon.log` | 守护进程日志（2 MiB 上限，满了轮转到 `daemon.log.1`；游戏原文只保留非噪音行） |
 | `.heartbeat` | 进程心跳（每 30 秒更新） |
+| `profile.json` | （可选）本会话的游戏画像：服务器文本语义，见下节 |
+
+## 游戏画像（`profile.json`）
+
+公共核心不内置任何服务器的文本写法。HP/MP/等级/金币怎么写、出口怎么列、什么算战斗开始/结束、哪些播报是事件、
+哪些行是噪音、方向词怎么反向，全部来自**游戏画像**，按这个顺序查找第一个存在的文件：
+
+1. `<会话目录>/profile.json`（本会话专用）
+2. `<存储根>/profiles/<server.host>.json`（同一服务器的所有会话共用；存储根由启动器通过 `MUD_STORAGE_ROOT` 交给子进程，默认 `~/.mud-agent`，不带 `--session` 的扁平会话就是会话目录本身；`server.host` 取自 `config.json`；主机名小写，DNS 名 / IPv4 原样，IPv6 等含特殊字符的按 URL 百分号编码，如 `2001%3Adb8%3A%3A1.json`）
+3. 内置默认画像（随包发布为 `profiles/example.json`，是一台中文 LPMud 的示例，不是通用规则）
+
+画像文件只需写要改的部分：按"顶层分区 → 字段"两级合并到默认画像上，数组整体替换。正则写成字符串，
+需要 flags 时写 `{ "pattern": "...", "flags": "i" }`。文件存在但不合法（类型错误、缺捕获组、拼错的键）时 daemon 会带着出错的键拒绝启动，不会悄悄退回默认。
+
+```json
+{
+  "name": "my-mud",
+  "status": { "query": "score", "hp": ["HP\\s*(\\d+)/(\\d+)"] },
+  "combat": { "start": ["attacks you"], "end": ["is DEAD"] },
+  "exits": { "room": ["^\\[Exits: (.+)\\]$"], "splitter": "[,\\s]+" },
+  "triggers": [{ "id": "death", "pattern": "You are DEAD", "priority": "critical", "label": "你死了", "advice": "找复活点", "discrete": true }]
+}
+```
+
+字段含义（捕获组约定等）见 `src/core/game-profile.ts` 的类型注释；完整示例见 `profiles/example.json`。
+画像由驾驭模型在实际游戏中观察回包生成、持续迭代——换服务器时复制示例按回包改，而不是改核心代码。
+
+血量上限只由双值样本建立：单值样本（`生命值：80`、`<80 hp>` 提示符）沿用已知上限、超过时置为未知；上限未知、或双值样本超过 5 分钟保鲜期时，
+autopilot 发画像里的 `status.query` 刷新并暂停策略直到新的双值样本到来（陪伴模式由驾驭模型自己发状态命令）——升级 / 换装靠保鲜期兜底，核心不从文本猜。
 
 ## 命令速查
 

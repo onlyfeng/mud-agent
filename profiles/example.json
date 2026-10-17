@@ -1,0 +1,335 @@
+{
+  "name": "example-cn-lpmud",
+  "status": {
+    "query": "hp",
+    "hp": [
+      "[生精体气血][命力量精气]?\\s*[：:]\\s*(\\d+)\\s*[/／]\\s*(\\d+)",
+      {
+        "pattern": "HP\\s*[：:]\\s*(\\d+)\\s*[/／]\\s*(\\d+)",
+        "flags": "i"
+      },
+      {
+        "pattern": "<\\s*(\\d+)\\s*hp",
+        "flags": "i"
+      },
+      "生命[值点]?\\s*[：:]\\s*(\\d+)"
+    ],
+    "mp": [
+      "内力\\s*[：:]\\s*(\\d+)\\s*[/／]\\s*(\\d+)",
+      "内力\\s*[：:]\\s*(\\d+)",
+      "[法魔]力\\s*[：:]\\s*(\\d+)\\s*[/／]\\s*(\\d+)",
+      {
+        "pattern": "MP\\s*[：:]\\s*(\\d+)\\s*[/／]\\s*(\\d+)",
+        "flags": "i"
+      },
+      "精神\\s*[：:]\\s*(\\d+)\\s*[/／]\\s*(\\d+)"
+    ],
+    "level": [
+      {
+        "pattern": "等级[：:\\s]*(\\d+)|Lv\\.?\\s*(\\d+)|Level\\s*(\\d+)",
+        "flags": "i"
+      }
+    ],
+    "gold": [
+      {
+        "pattern": "[银金][币两钱]?\\s*[：:]\\s*(\\d+)|gold[：:\\s]*(\\d+)",
+        "flags": "i"
+      }
+    ]
+  },
+  "exits": {
+    "state": [
+      "(?:明显的?)?出[口路][：:\\s]+([东南西北上下出入、,，\\s]+)",
+      {
+        "pattern": "\\[Exits?:\\s*([^\\]]+)\\]",
+        "flags": "i"
+      }
+    ],
+    "room": [
+      "这里(?:明显的|唯一的)?出口是\\s+(.+?)[。.]?$"
+    ],
+    "splitter": "[、，,和\\s]+"
+  },
+  "room": {
+    "name": [
+      "\\s*-\\s*$",
+      "^[\\u4e00-\\u9fa5]{2,10}$"
+    ],
+    "exclude": [
+      "[你我他它]",
+      "[→←↑↓]",
+      "^\\[",
+      "^【"
+    ],
+    "strip": [
+      "\\s*-\\s*$"
+    ],
+    "maxLength": 25
+  },
+  "items": {
+    "marker": [
+      "^[□✦◆▶]\\s*(.+?\\([\\w\\s]+\\).*)$"
+    ],
+    "plain": [
+      "^[\\u4e00-\\u9fa5\\w]+\\([\\w\\s]+\\)"
+    ],
+    "pickedUp": [
+      "你捡起"
+    ]
+  },
+  "combat": {
+    "start": [
+      "向你的.+发动",
+      "往你的.+",
+      "打了你一",
+      "刺了你一",
+      "踢了你一",
+      "正在战斗",
+      "向你发起",
+      "想杀死你",
+      "注视着你的行动",
+      "准备发动攻势"
+    ],
+    "end": [
+      "死了|被你杀死|你杀死了|逃走了|逃跑了|战斗结束|胜利|倒下了|断气|阵亡"
+    ]
+  },
+  "events": [
+    {
+      "type": "level_up",
+      "patterns": [
+        "你升级了|道行境界|武学境界"
+      ]
+    },
+    {
+      "type": "rare_item",
+      "patterns": [
+        "稀有|宝贝|天书|神器"
+      ]
+    },
+    {
+      "type": "puzzle",
+      "patterns": [
+        "谜题|机关|秘道|暗门"
+      ]
+    },
+    {
+      "type": "boss",
+      "patterns": [
+        {
+          "pattern": "首领|妖王|boss|大王|魔王",
+          "flags": "i"
+        }
+      ]
+    }
+  ],
+  "triggers": [
+    {
+      "id": "death",
+      "pattern": {
+        "pattern": "你死了|你已死亡|你倒下了|you (?:are dead|have died|die\\b)|\\*{3}dead\\*{3}",
+        "flags": "i"
+      },
+      "priority": "critical",
+      "label": "你死了",
+      "advice": "角色已死亡！需要找到复活点或等待处理。",
+      "discrete": true
+    },
+    {
+      "id": "boss",
+      "pattern": {
+        "pattern": "boss|首领|魔王|大妖|龙王|神兽|古神|守护者|boss战|强敌",
+        "flags": "i"
+      },
+      "priority": "high",
+      "label": "检测到Boss",
+      "advice": "发现强力敌人！建议做好准备再战。"
+    },
+    {
+      "id": "puzzle",
+      "pattern": {
+        "pattern": "谜题|机关|符文|解锁|密码|puzzle|riddle|钥匙.*锁|锁.*需要",
+        "flags": "i"
+      },
+      "priority": "high",
+      "label": "发现谜题/机关",
+      "advice": "这里有谜题或机关，需要思考或找线索。"
+    },
+    {
+      "id": "level_up",
+      "pattern": {
+        "pattern": "你升级了|恭喜.*升|你现在是.*级|you gain a level|升为",
+        "flags": "i"
+      },
+      "priority": "normal",
+      "label": "升级了！",
+      "advice": "恭喜升级！可以查看新属性和技能。",
+      "discrete": true
+    },
+    {
+      "id": "quest_update",
+      "pattern": {
+        "pattern": "任务完成|完成了任务|任务更新|quest complete|任务.*进度",
+        "flags": "i"
+      },
+      "priority": "normal",
+      "label": "任务更新",
+      "advice": "任务有进展，可以查看任务日志。",
+      "discrete": true
+    },
+    {
+      "id": "rare_item",
+      "pattern": {
+        "pattern": "神器|传说|稀有|极品|legendary|ancient.*weapon|你发现了.*珍贵",
+        "flags": "i"
+      },
+      "priority": "normal",
+      "label": "发现稀有物品",
+      "advice": "发现了珍贵物品！",
+      "discrete": true
+    },
+    {
+      "id": "npc_talk",
+      "pattern": {
+        "pattern": "对你说[：:]|告诉你[：:]|whispers?|says? to you",
+        "flags": "i"
+      },
+      "priority": "low",
+      "label": "NPC 在说话",
+      "advice": "NPC 有话说，可能是任务或线索。"
+    }
+  ],
+  "noise": {
+    "ambientChat": [
+      "^【(闲聊|频道|世界|广播|传闻|谣言|江湖|帮派|门派|新手|公告|系统公告)】"
+    ],
+    "movement": [
+      "(走了过来|走了过去|跑了过来|跑了过去|往[东南西北上下]{1,2}离开|离开了[。！]?$|来到了这里[。！]?$|从里面走了出来[。！]?$)"
+    ],
+    "movementSelf": [
+      "^你"
+    ],
+    "emote": [
+      "(再吹一声口哨|随之往上冉冉地升起|随之飘去不见了|吹了一声口哨)"
+    ],
+    "loginPrompt": [
+      {
+        "pattern": "(请输入.{0,6}密码|密码[：:]\\s*\\?*\\s*$|password\\s*[:：]?\\s*$)",
+        "flags": "i"
+      }
+    ],
+    "inlineId": "(?<=[\\u3400-\\u9fff\\uf900-\\ufaff])\\(([A-Za-z][A-Za-z' -]*)\\)",
+    "keepAnnotations": {
+      "pattern": "^(boss|legendary|epic|rare|unique)$",
+      "flags": "i"
+    }
+  },
+  "directions": {
+    "reverse": {
+      "north": "south",
+      "south": "north",
+      "east": "west",
+      "west": "east",
+      "up": "down",
+      "down": "up",
+      "northeast": "southwest",
+      "southwest": "northeast",
+      "northwest": "southeast",
+      "southeast": "northwest",
+      "n": "s",
+      "s": "n",
+      "e": "w",
+      "w": "e",
+      "u": "d",
+      "d": "u",
+      "ne": "sw",
+      "sw": "ne",
+      "nw": "se",
+      "se": "nw",
+      "北": "南",
+      "南": "北",
+      "东": "西",
+      "西": "东",
+      "上": "下",
+      "下": "上",
+      "东北": "西南",
+      "西南": "东北",
+      "西北": "东南",
+      "东南": "西北",
+      "in": "out",
+      "out": "in",
+      "enter": "out",
+      "leave": "in",
+      "exit": "in",
+      "进": "出",
+      "出": "进",
+      "进入": "出去",
+      "出去": "进入"
+    },
+    "aliases": [
+      [
+        "north",
+        "n",
+        "北"
+      ],
+      [
+        "south",
+        "s",
+        "南"
+      ],
+      [
+        "east",
+        "e",
+        "东"
+      ],
+      [
+        "west",
+        "w",
+        "西"
+      ],
+      [
+        "up",
+        "u",
+        "上"
+      ],
+      [
+        "down",
+        "d",
+        "下"
+      ],
+      [
+        "northeast",
+        "ne",
+        "东北"
+      ],
+      [
+        "southwest",
+        "sw",
+        "西南"
+      ],
+      [
+        "northwest",
+        "nw",
+        "西北"
+      ],
+      [
+        "southeast",
+        "se",
+        "东南"
+      ],
+      [
+        "in",
+        "enter",
+        "进",
+        "进入"
+      ],
+      [
+        "out",
+        "leave",
+        "exit",
+        "出",
+        "出去"
+      ]
+    ]
+  }
+}

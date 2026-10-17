@@ -8,10 +8,15 @@
  * 如果调了 process.exit()，后注册的不会执行。
  */
 
+import { activateGameProfile, loadGameProfile } from "../core/game-profile.js";
 import { buildPaths, resolveMudDir } from "../infra/paths.js";
 import { startDaemon } from "../services/daemon.service.js";
 
 const mudDir = resolveMudDir();
 const paths = buildPaths(mudDir);
+
+const loaded = loadGameProfile(mudDir);
+activateGameProfile(loaded.profile);
+console.log(`[daemon] 游戏画像: ${loaded.profile.name}${loaded.source ? ` (${loaded.source})` : " (内置默认)"}`);
 
 startDaemon({ paths });

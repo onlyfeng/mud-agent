@@ -37,11 +37,11 @@ export interface GameState {
   loginDone: boolean;
   hp: number | null;
   maxHp: number | null;
+  /** 最近一份双值血量样本的时刻；autopilot 据此判断上限是否陈旧（单值样本不刷新它） */
+  maxHpSampledAt?: string | null;
   mp: number | null;
   maxMp: number | null;
   level: number | null;
-  /** 已确认的角色等级（只由明确的角色等级写法更新），血量上限连续性判断的基线；level 仍是宽泛匹配的展示值 */
-  characterLevel?: number | null;
   gold: number | null;
   exits: string[];
   location: string;
@@ -62,6 +62,8 @@ export interface TriggerDefinition {
   priority: AlertPriority;
   label: string;
   advice: string;
+  /** 离散事件：每次发生独立计数，只抑制几秒内的重发；否则按 id 在窗口内去重 */
+  discrete?: boolean;
 }
 
 export interface Alert {

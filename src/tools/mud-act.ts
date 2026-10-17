@@ -1,10 +1,21 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { defaultGameProfile, type GameProfile, loadGameProfile } from "../core/game-profile.js";
 import { isLogNoiseLine } from "../core/noise-filter.js";
 import type { MudActParams, OpenClawPluginApi } from "../core/types.js";
 import { readQueueFile, withQueueLock, writeQueueFile } from "../infra/send-queue.js";
 import { resolveSessionDir } from "../lib/session-key.js";
+
+// 网关同时服务多个会话：按目录取各自的画像；画像文件写坏时这里只影响噪音过滤，退回默认并由 daemon 启动时报错
+function profileFor(dir: string, storageRoot: string): GameProfile {
+  try {
+    return loadGameProfile(dir, storageRoot).profile;
+  } catch {
+    return defaultGameProfile();
+  }
+}
+
 import { getMudSessionStore } from "../storage/session-store.js";
 
 /**
@@ -82,7 +93,8 @@ export function registerMudActTool(api: OpenClawPluginApi): void {
       const drainedAt = await waitForQueueDrain(queueFile, sentAt, requestId, deadline);
       // 游标用 >=：drainedAt 与输出行的 ts 都只有毫秒精度，同一毫秒内返回的响应不能丢。
       const since = drainedAt ?? sentAt;
-      if (drainedAt) await waitUntilQuiet(outputFile, since, deadline, quietMs);
+      if (drainedAt)
+        await waitUntilQuiet(outputFile, since, deadline, quietMs, profileFor(dir, store.getStorageRoot()));
 
       // ── 3. 读取命令发出之后的新输出行 ────────────────────────────────
       try {
@@ -193,7 +205,11 @@ function readQueue(queueFile: string): QueueSnapshot {
 // 读失败视为尚无新行，轮询中不抛出。环境噪音（闲聊、他人移动/到场、装饰行）不计入：
 // 它们不能单独启动静默窗口，否则繁忙服务器上一句闲聊就会让 mud_act 在真实响应到达前返回。
 // 输出文件被裁到最新 500 行：持续输出时计数会停在 500 不再增长，所以还要看最新一行的身份（ts + 文本）有没有变
-function readNewOutputProgress(outputFile: string, since: Date): { count: number; newest: string } {
+function readNewOutputProgress(
+  outputFile: string,
+  since: Date,
+  profile: GameProfile,
+): { count: number; newest: string } {
   try {
     const raw = fs.readFileSync(outputFile, "utf8");
     const all = raw.trim().split("\n").filter(Boolean);
@@ -202,7 +218,7 @@ function readNewOutputProgress(outputFile: string, since: Date): { count: number
     for (const line of all) {
       try {
         const { ts, text } = JSON.parse(line) as { ts: string; text?: string };
-        if (new Date(ts) >= since && !isLogNoiseLine(String(text ?? ""))) {
+        if (new Date(ts) >= since && !isLogNoiseLine(String(text ?? ""), profile)) {
           count += 1;
           newest = line;
         }
@@ -220,7 +236,13 @@ function readNewOutputProgress(outputFile: string, since: Date): { count: number
 // 自 sentAt 起超过 waitMs 也返回。二者先到先返回。
 // 已见到新输出时，休眠不超过剩余静默时间，避免静默截止点
 // 卡在 POLL_MS 边界上。
-async function waitUntilQuiet(outputFile: string, since: Date, deadline: number, quietMs: number): Promise<void> {
+async function waitUntilQuiet(
+  outputFile: string,
+  since: Date,
+  deadline: number,
+  quietMs: number,
+  profile: GameProfile,
+): Promise<void> {
   let seen = 0;
   let seenNewest = "";
   let lastGrowthAt = Date.now();
@@ -235,7 +257,7 @@ async function waitUntilQuiet(outputFile: string, since: Date, deadline: number,
 
     if (Date.now() >= deadline) return;
 
-    const { count, newest } = readNewOutputProgress(outputFile, since);
+    const { count, newest } = readNewOutputProgress(outputFile, since, profile);
     if (count > seen || (count > 0 && newest !== seenNewest)) {
       seen = count;
       seenNewest = newest;

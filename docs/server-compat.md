@@ -117,7 +117,7 @@ When user pastes raw output:
 2. Find where room names appear (usually first non-blank line after movement)
 3. Find exit format
 4. Test patterns against the sample
-5. Update the regex in `scripts/mud-daemon.js` trigger/parse section
+5. Write the patterns into the game profile — `<session>/profile.json` or `<storage root>/profiles/<host>.json` (the storage root is `~/.mud-agent` by default and is handed to child processes as `MUD_STORAGE_ROOT`; in a multi-session deployment `MUD_DIR` is the session directory, not the root) — never into the core code. Only the sections you override need to be present; see `profiles/example.json` for every field and `README.md › 游戏画像` for the lookup / merge rules
 
 Example tuning session:
 

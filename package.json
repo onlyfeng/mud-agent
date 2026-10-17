@@ -27,7 +27,8 @@
     "CHANGELOG.md",
     "src/",
     "scripts/",
-    "tsconfig.json"
+    "tsconfig.json",
+    "profiles/"
   ],
   "engines": {
     "node": ">=20.19.0"

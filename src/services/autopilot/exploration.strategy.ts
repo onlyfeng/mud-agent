@@ -2,6 +2,7 @@
  * 探索策略：look → pickup → move 循环。
  */
 
+import { getGameProfile } from "../../core/game-profile.js";
 import { isAmbientChatLine, isEmoteNoiseLine, isLogNoiseLine, stripAsciiIds } from "../../core/noise-filter.js";
 import {
   detectAlertType,
@@ -33,73 +34,21 @@ export function choiceAllowsPickup(choice: string | null): boolean {
   return /继续|捡|拾取|pick|continue/i.test(choice);
 }
 
-const REVERSE_EXITS: Record<string, string> = {
-  north: "south",
-  south: "north",
-  east: "west",
-  west: "east",
-  up: "down",
-  down: "up",
-  northeast: "southwest",
-  southwest: "northeast",
-  northwest: "southeast",
-  southeast: "northwest",
-  n: "s",
-  s: "n",
-  e: "w",
-  w: "e",
-  u: "d",
-  d: "u",
-  ne: "sw",
-  sw: "ne",
-  nw: "se",
-  se: "nw",
-  北: "南",
-  南: "北",
-  东: "西",
-  西: "东",
-  上: "下",
-  下: "上",
-  东北: "西南",
-  西南: "东北",
-  西北: "东南",
-  东南: "西北",
-  in: "out",
-  out: "in",
-  enter: "out",
-  leave: "in",
-  exit: "in",
-  进: "出",
-  出: "进",
-  进入: "出去",
-  出去: "进入",
-};
-// 同一方向的别名（长名 / 缩写 / 中文）：反向出口在当前房间实际提供的出口里挑一个（有的 MUD 只接受它列出的那种写法）
-const EXIT_ALIAS_GROUPS: string[][] = [
-  ["north", "n", "北"],
-  ["south", "s", "南"],
-  ["east", "e", "东"],
-  ["west", "w", "西"],
-  ["up", "u", "上"],
-  ["down", "d", "下"],
-  ["northeast", "ne", "东北"],
-  ["southwest", "sw", "西南"],
-  ["northwest", "nw", "西北"],
-  ["southeast", "se", "东南"],
-  ["in", "enter", "进", "进入"],
-  ["out", "leave", "exit", "出", "出去"],
-];
-const EXIT_ALIASES: Record<string, string[]> = Object.fromEntries(
-  EXIT_ALIAS_GROUPS.flatMap((group) => group.map((name) => [name, group])),
-);
-
+// 反向出口在当前房间实际提供的出口里挑一个同方向的别名（有的 MUD 只接受它列出的那种写法）；方向表来自画像
 export function reverseExit(exit: string, availableExits: readonly string[] = []): string | null {
+  const { reverse, aliases } = getGameProfile().directions;
   const key = exit.trim();
-  const primary = REVERSE_EXITS[key.toLowerCase()] ?? REVERSE_EXITS[key] ?? null;
+  const primary = reverse[key.toLowerCase()] ?? null;
   if (primary === null) return null;
-  const candidates = EXIT_ALIASES[primary] ?? EXIT_ALIASES[primary.toLowerCase()] ?? [primary];
-  const offered = new Set(availableExits.map((e) => e.trim().toLowerCase()));
-  return candidates.find((c) => offered.has(c.toLowerCase())) ?? primary;
+  const wanted = primary.toLowerCase();
+  const group = aliases.find((g) => g.some((name) => name.toLowerCase() === wanted)) ?? [primary];
+  // 返回房间实际列出的那个写法（大小写也照服务器的来）：只接受所列命令的服务器才认
+  const offered = new Map(availableExits.map((e) => [e.trim().toLowerCase(), e.trim()]));
+  for (const c of group) {
+    const actual = offered.get(c.toLowerCase());
+    if (actual !== undefined) return actual;
+  }
+  return primary;
 }
 
 /** 决策文本的导航语义：hold = 停下查看 / 等待；back = 返回 / 原路退回；null = 继续或无导航含义 */
@@ -253,7 +202,7 @@ export class ExplorationStrategy implements IStrategy {
 
     if (this.phase === "pickup") {
       if (newLines.length > 0) {
-        const pickedLines = newLines.filter((l) => /你捡起/.test(l.text));
+        const pickedLines = newLines.filter((l) => getGameProfile().items.pickedUp.some((re) => re.test(l.text)));
         if (pickedLines.length > 0) {
           this.narrativeParts.push(`捡起了${pickedLines.length}样物品。`);
         }

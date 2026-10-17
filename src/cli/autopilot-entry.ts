@@ -4,6 +4,7 @@
  * autopilot 独立进程入口。
  */
 
+import { activateGameProfile, loadGameProfile } from "../core/game-profile.js";
 import { sendToChannel } from "../infra/notifier.js";
 import { buildPaths, resolveMudDir } from "../infra/paths.js";
 import { removeOwnPid } from "../infra/process-guard.js";
@@ -11,6 +12,7 @@ import { startAutopilot } from "../services/autopilot/autopilot.service.js";
 
 const mudDir = resolveMudDir();
 const paths = buildPaths(mudDir);
+activateGameProfile(loadGameProfile(mudDir).profile);
 
 // 只删自己持有的 PID 锁：退出窗口里顶上来的新 autopilot 可能已经拿走了这个槽位
 process.on("uncaughtException", (err) => {

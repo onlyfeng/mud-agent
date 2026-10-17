@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { checkTriggers, TRIGGERS } from "./triggers";
+import { compileGameProfile, DEFAULT_PROFILE_JSON, mergeGameProfileJson } from "./game-profile";
+import { activeTriggers, checkTriggers } from "./triggers";
 import type { Alert, GameState } from "./types";
 
 describe("triggers", () => {
@@ -79,8 +80,60 @@ describe("triggers", () => {
     expect(result.alerts.length).toBe(50);
   });
 
-  it("TRIGGERS array has expected count", () => {
-    expect(TRIGGERS.length).toBe(9);
+  it("a custom discrete trigger id (player_dead) gets the discrete dedup semantics from the profile field, not from a reserved id", () => {
+    const profile = compileGameProfile(
+      mergeGameProfileJson(DEFAULT_PROFILE_JSON, {
+        triggers: [
+          {
+            id: "player_dead",
+            pattern: "You are DEAD",
+            priority: "critical",
+            label: "dead",
+            advice: "respawn",
+            discrete: true,
+          },
+        ],
+      }),
+      "test",
+    );
+    const first = checkTriggers(["You are DEAD"], baseState, [], undefined, { profile });
+    expect(first.alerts.filter((a) => a.id === "player_dead").length).toBe(1);
+    const earlier = first.alerts.map((a) => ({ ...a, read: true, time: new Date(Date.now() - 60_000).toISOString() }));
+    const again = checkTriggers(["You are DEAD"], baseState, earlier, undefined, { profile });
+    expect(again.changed).toBe(true); // 一分钟后再次死亡是新事件，不被 5 分钟窗口压制
+    expect(again.alerts.filter((a) => a.id === "player_dead").length).toBe(2);
+  });
+
+  it("profile text triggers are matched per line, so a ^…$-anchored death rule fires inside a multi-line batch", () => {
+    const profile = compileGameProfile(
+      mergeGameProfileJson(DEFAULT_PROFILE_JSON, {
+        triggers: [
+          {
+            id: "death",
+            pattern: "^You are DEAD$",
+            priority: "critical",
+            label: "dead",
+            advice: "respawn",
+            discrete: true,
+          },
+        ],
+      }),
+      "test",
+    );
+    const r = checkTriggers(["The goblin hits you.", "You are DEAD", "Exits: north"], baseState, [], undefined, {
+      profile,
+    });
+    expect(r.alerts.some((a) => a.id === "death")).toBe(true);
+    expect(r.alerts.find((a) => a.id === "death")?.context).toBe("You are DEAD");
+  });
+
+  it("active triggers = 2 numeric HP triggers from core + the profile's text triggers", () => {
+    expect(activeTriggers().length).toBe(9);
+    expect(
+      activeTriggers()
+        .filter((t) => t.checkFn)
+        .map((t) => t.id),
+    ).toEqual(["hp_critical", "hp_low"]);
   });
 
   it("does not fire text triggers on ambient chat lines (【闲聊】 boss noise 回归)", () => {

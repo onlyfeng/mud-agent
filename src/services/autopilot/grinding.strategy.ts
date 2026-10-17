@@ -2,18 +2,16 @@
  * 挂机策略：寻怪 → 战斗循环。
  */
 
-import { detectCombat } from "../../core/text-analyzer.js";
+import { detectCombat, detectCombatEnd } from "../../core/text-analyzer.js";
 import type { GameState, IStrategy, OutputLine, StrategyAction, StrategyContext } from "../../core/types.js";
 
 const LONG_FIGHT_ROUNDS = 6;
 const COMBAT_QUIET_TICKS = 2;
-const COMBAT_END_RE = /死了|被你杀死|你杀死了|逃走了|逃跑了|战斗结束|胜利|倒下了|断气|阵亡/;
 
 /** 本批输出里最后一个战斗相关行是结束信号（而不是新的攻击）才算战斗结束：「野狼死了」之后「老虎向你发动攻击」仍在战斗 */
 function combatEndedByOrder(lines: OutputLine[]): boolean {
   for (let i = lines.length - 1; i >= 0; i--) {
-    const text = lines[i].text;
-    if (COMBAT_END_RE.test(text)) return true;
+    if (detectCombatEnd([lines[i]])) return true;
     if (detectCombat([lines[i]])) return false;
   }
   return false;

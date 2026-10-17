@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { STORAGE_ROOT_ENV } from "../core/game-profile.js";
 import { sleepSync } from "../lib/dir-lock-contract.mjs";
 import { acquireMigrationLockAsync, acquireMigrationLockSync } from "../lib/migration-lock-contract.mjs";
 import { isProcessRunning, readPid } from "./process-guard.js";
@@ -19,12 +20,12 @@ export const LOCK_BUSY_REASON = "另一个 start 或 normalize:sessions 正在�
 export const DAEMON_DIR_MISSING_REASON =
   "会话目录已不存在（可能刚被 normalize:sessions 迁移/归档），未启动守护进程；请重新 start";
 
-function spawnDetached(entry: string, dir: string): number | undefined {
+function spawnDetached(entry: string, storageRoot: string, dir: string): number | undefined {
   const out = fs.openSync(path.join(dir, "daemon.log"), "a");
   const child = spawn("node", [entry], {
     detached: true,
     stdio: ["ignore", out, out],
-    env: { ...process.env, MUD_DIR: dir },
+    env: { ...process.env, MUD_DIR: dir, [STORAGE_ROOT_ENV]: storageRoot },
   });
   child.unref();
   fs.closeSync(out);
@@ -51,7 +52,7 @@ export function launchDaemonSync(
     return { ok: false, reason: LOCK_BUSY_REASON };
   }
   try {
-    const started = spawnUnderLock(dir, entry);
+    const started = spawnUnderLock(storageRoot, dir, entry);
     if (!started.ok) return started;
     if (started.alreadyRunning) return { ok: true, pid: started.pid, confirmed: true, alreadyRunning: true };
     const deadline = Date.now() + (opts.confirmMs ?? DEFAULT_CONFIRM_MS);
@@ -79,7 +80,7 @@ export async function launchDaemon(
     return { ok: false, reason: LOCK_BUSY_REASON };
   }
   try {
-    const started = spawnUnderLock(dir, entry);
+    const started = spawnUnderLock(storageRoot, dir, entry);
     if (!started.ok) return started;
     if (started.alreadyRunning) return { ok: true, pid: started.pid, confirmed: true, alreadyRunning: true };
     const deadline = Date.now() + (opts.confirmMs ?? DEFAULT_CONFIRM_MS);
@@ -164,6 +165,7 @@ function isChildRunning(pid: number): boolean {
 }
 
 function spawnUnderLock(
+  storageRoot: string,
   dir: string,
   entry: string,
 ): { ok: true; pid: number | undefined; alreadyRunning?: boolean } | { ok: false; reason: string } {
@@ -171,5 +173,5 @@ function spawnUnderLock(
   // 两个 start 并发都过了调用方的 PID 检查：锁内再查一次，已有 daemon 就直接返回它，不派生一个必然撞 PID 锁退出的子进程
   const running = isProcessRunning(path.join(dir, "mud-daemon.pid"));
   if (running) return { ok: true, pid: running, alreadyRunning: true };
-  return { ok: true, pid: spawnDetached(entry, dir) };
+  return { ok: true, pid: spawnDetached(entry, storageRoot, dir) };
 }

@@ -1,88 +1,66 @@
 /**
- * 游戏文本分析工具（autopilot 策略使用）。
+ * 游戏文本分析工具（autopilot 策略使用）。所有模式来自游戏画像（`game-profile.ts`）。
  */
 
+import { type GameProfile, getGameProfile } from "./game-profile.js";
+import { splitExits } from "./state-parser.js";
 import type { OutputLine } from "./types.js";
 
-/** 从输出行中提取物品列表 */
-export function parseItemsFromLines(lines: OutputLine[]): string[] {
+export function parseItemsFromLines(lines: OutputLine[], profile: GameProfile = getGameProfile()): string[] {
   const items: string[] = [];
-  const itemPattern = /^[\u4e00-\u9fa5\w]+\([\w\s]+\)/;
-  const markerPattern = /^[□✦◆▶]\s*(.+?)\([\w\s]+\)/;
   for (const { text } of lines) {
-    if (markerPattern.test(text)) {
-      const m = text.match(/^[□✦◆▶]\s*(.+)/);
-      if (m) items.push(m[1].trim());
-    } else if (itemPattern.test(text.trim())) {
+    const marked = profile.items.marker.map((re) => text.match(re)).find((m) => m !== null);
+    if (marked) {
+      const item = (marked[1] ?? "").trim();
+      if (item) items.push(item);
+    } else if (profile.items.plain.some((re) => re.test(text.trim()))) {
       items.push(text.trim());
     }
   }
   return items;
 }
 
-/** 检测战斗状态 */
-export function detectCombat(lines: OutputLine[]): boolean {
-  const combatPatterns = [
-    /向你的.+发动/,
-    /往你的.+/,
-    /打了你一/,
-    /刺了你一/,
-    /踢了你一/,
-    /正在战斗/,
-    /向你发起/,
-    /想杀死你/,
-    /注视着你的行动/,
-    /准备发动攻势/,
-  ];
-  return lines.some(({ text }) => combatPatterns.some((p) => p.test(text)));
+export function detectCombat(lines: OutputLine[], profile: GameProfile = getGameProfile()): boolean {
+  return lines.some(({ text }) => profile.combat.start.some((re) => re.test(text)));
 }
 
-/** 检测是否在看房间描述 */
-export function detectRoomDescription(lines: OutputLine[]): boolean {
-  return lines.some(({ text }) => /这里明显的出口是/.test(text) || /这里唯一的出口是/.test(text));
+export function detectCombatEnd(lines: OutputLine[], profile: GameProfile = getGameProfile()): boolean {
+  return lines.some(({ text }) => profile.combat.end.some((re) => re.test(text)));
 }
 
-/** 从房间描述行提取出口 */
-export function parseExitsFromLines(lines: OutputLine[]): string[] | null {
+export function detectRoomDescription(lines: OutputLine[], profile: GameProfile = getGameProfile()): boolean {
+  return lines.some(({ text }) => profile.exits.room.some((re) => re.test(text)));
+}
+
+export function parseExitsFromLines(lines: OutputLine[], profile: GameProfile = getGameProfile()): string[] | null {
   for (const { text } of lines) {
-    const m = text.match(/这里(?:明显的|唯一的)?出口是\s+(.+?)[。.]?$/);
-    if (m) {
-      return m[1]
-        .split(/[、，,和\s]+/)
-        .map((e) => e.trim())
-        .filter(Boolean);
+    for (const re of profile.exits.room) {
+      const m = text.match(re);
+      if (m) return splitExits(m[1], profile.exits.splitter);
     }
   }
   return null;
 }
 
-/** 从行中提取室名 */
-export function parseRoomName(lines: OutputLine[]): string | null {
+export function parseRoomName(lines: OutputLine[], profile: GameProfile = getGameProfile()): string | null {
   for (const { text } of lines) {
     const t = text.trim();
-    if (
-      t.length > 0 &&
-      t.length < 25 &&
-      !/[你我他它]/.test(t) &&
-      !/[→←↑↓]/.test(t) &&
-      !/^\[/.test(t) &&
-      !/^【/.test(t)
-    ) {
-      if (/\s*-\s*$/.test(t) || /^[\u4e00-\u9fa5]{2,10}$/.test(t)) {
-        return t.replace(/\s*-\s*$/, "").trim();
-      }
-    }
+    if (t.length === 0 || t.length >= profile.room.maxLength) continue;
+    if (profile.room.exclude.some((re) => re.test(t))) continue;
+    if (!profile.room.name.some((re) => re.test(t))) continue;
+    const name = profile.room.strip
+      .reduce((acc, re) => acc.replace(new RegExp(re.source, `${re.flags}g`), ""), t)
+      .trim();
+    return name || t;
   }
   return null;
 }
 
-/** 检测触发器类事件 */
-export function detectAlertType(lines: OutputLine[]): string | null {
+export function detectAlertType(lines: OutputLine[], profile: GameProfile = getGameProfile()): string | null {
   for (const { text } of lines) {
-    if (/你升级了|道行境界|武学境界/.test(text)) return "level_up";
-    if (/稀有|宝贝|天书|神器/.test(text)) return "rare_item";
-    if (/谜题|机关|秘道|暗门/.test(text)) return "puzzle";
-    if (/首领|妖王|boss|大王|魔王/.test(text.toLowerCase())) return "boss";
+    for (const event of profile.events) {
+      if (event.patterns.some((re) => re.test(text))) return event.type;
+    }
   }
   return null;
 }

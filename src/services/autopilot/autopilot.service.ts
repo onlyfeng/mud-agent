@@ -3,6 +3,8 @@
  */
 
 import fs from "node:fs";
+import { getGameProfile } from "../../core/game-profile.js";
+import { maxHpUntrusted } from "../../core/state-parser.js";
 import type { Alert, AutopilotConfig, Decision, GameState, IStrategy, MudPaths, OutputLine } from "../../core/types.js";
 import {
   claimStopSignal,
@@ -183,6 +185,7 @@ function logLine(logFile: string, msg: string): void {
 // autopilot 是单用途进程：队列锁被占就等（最多 SEND_LOCK_WAIT_MS，远长于任何生产者的毫秒级临界区），
 // 策略状态与实际发出的命令因此始终一致。等了这么久还拿不到锁说明持锁者已经挂死，抛出让进程带着明确原因退出。
 const SEND_LOCK_WAIT_MS = 30_000;
+const STATUS_QUERY_INTERVAL_MS = 20_000;
 
 /** 入队；`unless` 在持锁时求值，为 true 则不写入。返回是否真的发出。 */
 export function sendCommand(
@@ -394,6 +397,9 @@ export async function startAutopilot(paths: MudPaths): Promise<void> {
       .map((d) => d.id),
   );
   let lowHpNotified = false;
+  const notifiedCritical = new Set<string>();
+  let maxUnknownLogged = false;
+  let statusQueriedAt = 0;
   const fullAutoNoticeAt = new Map<string, number>();
 
   while (true) {
@@ -431,6 +437,17 @@ export async function startAutopilot(paths: MudPaths): Promise<void> {
     };
     const state = loadJSON<Partial<GameState>>(paths.state, {});
     const alerts = loadJSON<Alert[]>(paths.alerts, []).filter((a) => !a.read);
+    // critical 告警（死亡等）的系统通知不受后面任何暂停分支（上限未知 / 低血 flee / 待决策）影响；
+    // 同一条未读告警只通知一次（按 id + 时刻识别），用户清掉之前不反复弹
+    for (const alert of alerts.filter((a) => a.priority === "critical")) {
+      const key = `${alert.id}@${alert.time}`;
+      if (notifiedCritical.has(key)) continue;
+      notifiedCritical.add(key);
+      notify("mud-agent 紧急警报", `${alert.label}：${alert.context || ""}`);
+    }
+    for (const key of notifiedCritical) {
+      if (!alerts.some((a) => `${a.id}@${a.time}` === key)) notifiedCritical.delete(key);
+    }
 
     // 未连接或尚未登录都等：重连后 socket 一连上就是 connected=true/loginDone=false，
     // 这时排队游戏命令会插进用户名/密码流程干扰自动登录。
@@ -479,9 +496,24 @@ export async function startAutopilot(paths: MudPaths): Promise<void> {
     disconnectTicks = 0;
     daemonAliveWaitTicks = 0;
 
+    // 上限不可信（未知、或双值样本超过保鲜期）：每 20 s 发一次画像里的状态查询，拿到新双值样本前本轮到此为止——
+    // 策略把缺上限当满血，不能在低血窗口里继续发 fight / 移动 / 拾取；查询丢失时保持暂停并重试，不信旧上限
+    if (maxHpUntrusted(state)) {
+      if (Date.now() - statusQueriedAt >= STATUS_QUERY_INTERVAL_MS) {
+        statusQueriedAt = Date.now();
+        sendCommand(paths.queue, getGameProfile().status.query, log, { unless: stopPending });
+        if (stoppedWhileSending()) break;
+      }
+      if (!maxUnknownLogged) {
+        maxUnknownLogged = true;
+        log("血量基线不可信（无样本 / 上限未知 / 已陈旧）：已请求状态刷新，拿到新的双值样本前暂停策略动作");
+      }
+      await sleep(config.loopInterval || 3500);
+      continue;
+    }
+    maxUnknownLogged = false;
+
     // 安全边界：每轮都尝试 flee，但频道通知只在进入低血状态时发一次，回到安全线后重置。
-    // 单值样本（`生命值: N`）没有 maxHp，用最近一次已知的 maxHp 换算，恢复样本才能重置边沿。
-    // 只信解析器的 maxHp：单值样本沿用上限（或在连续性断裂时置空）的判断已在 parseState 里做，这里再缓存一层只会把失效结果撤销
     const maxHpForEdge = state.maxHp;
     if (state.hp != null && maxHpForEdge && config.safetyBoundary.autoFlee) {
       const hpPct = (state.hp / maxHpForEdge) * 100;
@@ -506,10 +538,6 @@ export async function startAutopilot(paths: MudPaths): Promise<void> {
       log("有待处理的决策，暂停执行。");
       await sleep(2000);
       continue;
-    }
-
-    for (const alert of alerts.filter((a) => a.priority === "critical")) {
-      notify("mud-agent 紧急警报", `${alert.label}：${alert.context || ""}`);
     }
 
     // 上一轮没发出去的命令先补发（在读输出 / 消费决策之前）。无论成败本轮都到此为止：
